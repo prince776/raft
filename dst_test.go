@@ -23,6 +23,7 @@ import (
 type seqFSM struct {
 	mu      dst.Mutex
 	applied []string
+	h       *dsttest.Harness
 }
 
 func (f *seqFSM) Apply(l *Log) interface{} {
@@ -35,7 +36,7 @@ func (f *seqFSM) Apply(l *Log) interface{} {
 func (f *seqFSM) Snapshot() (FSMSnapshot, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	return &seqSnapshot{append([]string(nil), f.applied...)}, nil
+	return &seqSnapshot{applied: append([]string(nil), f.applied...), h: f.h}, nil
 }
 
 func (f *seqFSM) Restore(r io.ReadCloser) error {
@@ -47,26 +48,33 @@ func (f *seqFSM) Restore(r io.ReadCloser) error {
 	f.mu.Lock()
 	f.applied = got
 	f.mu.Unlock()
+	f.h.Sometimes("an FSM was restored from a snapshot")
 	return nil
 }
 
-type seqSnapshot struct{ applied []string }
+type seqSnapshot struct {
+	applied []string
+	h       *dsttest.Harness
+}
 
 func (s *seqSnapshot) Persist(sink SnapshotSink) error {
 	if err := json.NewEncoder(sink).Encode(s.applied); err != nil {
 		sink.Cancel()
 		return err
 	}
+	s.h.Sometimes("a snapshot was persisted")
 	return sink.Close()
 }
 
 func (s *seqSnapshot) Release() {}
 
-// dstNode is one server: its stores outlive its machine's crashes (a
-// perfectly durable disk, for now); its raft and FSM are rebuilt at boot.
+// dstNode is one server. Its log and stable store live in a file on its
+// machine's simulated disk (dstLogStore: what a crash keeps is what was
+// fsynced); its snapshots outlive crashes whole (for now); its raft and FSM
+// are rebuilt at each boot.
 type dstNode struct {
 	name  string
-	logs  *InmemStore
+	logs  *dstLogStore
 	snaps *InmemSnapshotStore
 	fsm   *seqFSM
 	raft  *Raft
@@ -82,15 +90,24 @@ func dstConfig(w *dst.World, name string) *Config {
 	c.ElectionTimeout = 200 * time.Millisecond
 	c.LeaderLeaseTimeout = 100 * time.Millisecond
 	c.CommitTimeout = 10 * time.Millisecond
+	// Snapshot often, so runs reach compaction and snapshot installs.
+	c.SnapshotThreshold = 64
+	c.SnapshotInterval = 500 * time.Millisecond
+	c.TrailingLogs = 32
 	return c
 }
 
-func dstCluster(h *dsttest.Harness, n int) []*dstNode {
+// dstScenario switches a store's weaker modes on (see dstLogStore).
+type dstScenario struct{ noSync, splitBatches bool }
+
+func dstCluster(h *dsttest.Harness, n int) []*dstNode { return dstClusterWith(h, n, dstScenario{}) }
+
+func dstClusterWith(h *dsttest.Harness, n int, sc dstScenario) []*dstNode {
 	var servers []Server
 	nodes := make([]*dstNode, n)
 	for i := range nodes {
 		name := fmt.Sprintf("n%d", i)
-		nodes[i] = &dstNode{name: name, logs: NewInmemStore(), snaps: NewInmemSnapshotStore()}
+		nodes[i] = &dstNode{name: name, snaps: NewInmemSnapshotStore()}
 		servers = append(servers, Server{ID: ServerID(name), Address: ServerAddress(name + ":7000")})
 	}
 	seq := 0
@@ -98,6 +115,14 @@ func dstCluster(h *dsttest.Harness, n int) []*dstNode {
 	for _, nd := range nodes {
 		nd.m = h.Machine(nd.name, func(w *dst.World) {
 			nd.snaps.w = w
+			logs, err := openDSTLogStore(w.FS(), "raft.log")
+			if err != nil {
+				h.Fail(err)
+				return
+			}
+			logs.noSync = sc.noSync
+			logs.splitBatches = sc.splitBatches
+			nd.logs = logs
 			stream, err := newDSTStream(w, nd.name+":7000")
 			if err != nil {
 				h.Fail(err)
@@ -112,7 +137,7 @@ func dstCluster(h *dsttest.Harness, n int) []*dstNode {
 					return
 				}
 			}
-			nd.fsm = &seqFSM{}
+			nd.fsm = &seqFSM{h: h}
 			r, err := NewRaft(conf, nd.fsm, nd.logs, nd.logs, nd.snaps, trans)
 			if err != nil {
 				h.Fail(err)
@@ -192,7 +217,7 @@ func dstCluster(h *dsttest.Harness, n int) []*dstNode {
 		}
 		return nil
 	})
-	h.Expect("a write committed")
+	h.Expect("a write committed", "a snapshot was persisted")
 	return nodes
 }
 
@@ -205,9 +230,13 @@ func TestDSTSmoke(t *testing.T) {
 	dsttest.Run(t, dstOpts(dsttest.Faults{}), func(h *dsttest.Harness) { dstCluster(h, 3) })
 }
 
-// TestDSTCrashes: nodes crash and restart (their stores are durable).
+// TestDSTCrashes: nodes crash and restart; their disks lose what wasn't
+// fsynced, tear writes and lose power mid-call.
 func TestDSTCrashes(t *testing.T) {
-	dsttest.Run(t, dstOpts(dsttest.Faults{Crash: true}), func(h *dsttest.Harness) { dstCluster(h, 3) })
+	dsttest.Run(t, dstOpts(dsttest.Faults{Crash: true, Disk: true}), func(h *dsttest.Harness) {
+		dstCluster(h, 3)
+		h.Expect("an FSM was restored from a snapshot")
+	})
 }
 
 // TestDSTPartitions: the network partitions (sometimes one way), with
@@ -219,5 +248,18 @@ func TestDSTPartitions(t *testing.T) {
 // TestDSTEverything: crashes, partitions, pauses and network faults at
 // once, five nodes.
 func TestDSTEverything(t *testing.T) {
-	dsttest.Run(t, dstOpts(dsttest.Faults{Crash: true, Partition: true, Network: true, Pause: true}), func(h *dsttest.Harness) { dstCluster(h, 5) })
+	dsttest.Run(t, dstOpts(dsttest.Faults{Crash: true, Disk: true, Partition: true, Network: true, Pause: true}), func(h *dsttest.Harness) { dstCluster(h, 5) })
+}
+
+// The store's guarantees matter: with fsync skipped (a store that returns
+// before its writes are durable), crashes lose acknowledged writes or
+// votes, and the checks catch it. Fails if no seed does.
+func TestDSTCatchesUnsyncedStore(t *testing.T) {
+	o := dstOpts(dsttest.Faults{Crash: true, Disk: true})
+	o.KeepGoing, o.DeterminismChecks = true, -1
+	rep := dsttest.Sweep(o, func(h *dsttest.Harness) { dstClusterWith(h, 3, dstScenario{noSync: true}) })
+	if len(rep.Failed) == 0 {
+		t.Fatalf("no seed of %d caught a store that doesn't fsync", rep.Runs)
+	}
+	t.Logf("%d of %d seeds caught it; first: seed %d: %v", len(rep.Failed), rep.Runs, rep.Failed[0].Seed, rep.Failed[0].Err)
 }
