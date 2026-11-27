@@ -7,18 +7,18 @@
     "TestDSTCrashes",
     "TestDSTPartitions",
     "TestDSTEverything",
-    "TestDSTFourNodes"
+    "TestDSTFourNodes",
+    "TestDSTFourNodesAmnesia"
   ],
   "bugs": [
     {
       "name": "quorum-off-by-one",
       "tests": [
-        "TestDSTCrashes",
-        "TestDSTPartitions",
-        "TestDSTEverything",
-        "TestDSTFourNodes"
+        "TestDSTFourNodes",
+        "TestDSTFourNodesAmnesia"
       ],
-      "note": "Upstream 163a55f: the commit quorum is the median of the sorted match indexes rounded up, so an even cluster commits on half its nodes."
+      "note": "Upstream 163a55f: an even cluster commits on half its nodes. Only even clusters run different code. With disks that keep what was fsynced it can't lose a write (a commit quorum of 2 still meets every election quorum of 3); it takes one node losing its disk during a 2|2 split (TestDSTQuorumOffByOneScripted plays that sequence).",
+      "reached": "a node lost its disk"
     },
     {
       "name": "vote-twice",

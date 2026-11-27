@@ -127,6 +127,9 @@ type dstNode struct {
 	fsm   *kvFSM
 	raft  *Raft
 	m     *dsttest.Machine
+	// wipeOnBoot: the next boot starts from an empty disk (a replaced
+	// disk: the amnesia scenario, or a scripted test).
+	wipeOnBoot bool
 }
 
 func dstConfig(w *dst.World, name string) *Config {
@@ -145,10 +148,14 @@ func dstConfig(w *dst.World, name string) *Config {
 	return c
 }
 
-// dstScenario switches weaker modes on: the store's (see dstLogStore), and
+// dstScenario switches weaker modes on: the store's (see dstLogStore);
 // naiveReadIndex, a client that serves ReadIndex reads without first
-// committing an entry in the leader's term.
-type dstScenario struct{ noSync, splitBatches, naiveReadIndex bool }
+// committing an entry in the leader's term; and amnesia, one node (drawn
+// per seed) losing its disk once, at its first restart: it comes back
+// empty under the same identity (a replaced disk). Correct raft survives
+// one amnesiac node when any two quorums share at least two nodes (four
+// or more voters), not with three.
+type dstScenario struct{ noSync, splitBatches, naiveReadIndex, amnesia bool }
 
 func dstCluster(h *dsttest.Harness, n int) []*dstNode { return dstClusterWith(h, n, dstScenario{}) }
 
@@ -163,9 +170,24 @@ func dstClusterWith(h *dsttest.Harness, n int, sc dstScenario) []*dstNode {
 	hist := check.NewHistory[check.KVInput, check.KVOutput](h.World())
 	keys := []string{"a", "b", "c"}
 	opID, client := 0, 0
+	victim := h.World().Rand().IntN(n)
 	acked := map[string]bool{} // IDs of writes whose Apply succeeded
-	for _, nd := range nodes {
+	for i, nd := range nodes {
+		boots := 0
 		nd.m = h.Machine(nd.name, func(w *dst.World) {
+			boots++
+			if sc.amnesia && i == victim && boots == 2 {
+				nd.wipeOnBoot = true
+			}
+			if nd.wipeOnBoot {
+				nd.wipeOnBoot = false
+				if err := w.FS().Remove("raft.log"); err != nil {
+					h.Fail(err)
+					return
+				}
+				nd.snaps = NewInmemSnapshotStore()
+				h.Sometimes("a node lost its disk")
+			}
 			nd.snaps.w = w
 			logs, err := openDSTLogStore(w.FS(), "raft.log")
 			if err != nil {
@@ -402,6 +424,18 @@ func TestDSTEverything(t *testing.T) {
 func TestDSTFourNodes(t *testing.T) {
 	dsttest.Run(t, dstOpts(dsttest.Faults{Crash: true, Disk: true, Partition: true, Network: true}),
 		func(h *dsttest.Harness) { dstCluster(h, 4) })
+}
+
+// TestDSTFourNodesAmnesia: four nodes, and one of them loses its disk
+// once (at its first restart) and comes back empty under its own name.
+// Correct raft survives it: with four voters any two quorums share two
+// nodes, so one that forgot still leaves one that remembers. A cluster
+// committing on fewer than three of four doesn't (quorum-off-by-one).
+func TestDSTFourNodesAmnesia(t *testing.T) {
+	dsttest.Run(t, dstOpts(dsttest.Faults{Crash: true, Disk: true, Partition: true, Network: true}), func(h *dsttest.Harness) {
+		dstClusterWith(h, 4, dstScenario{amnesia: true})
+		h.Expect("a node lost its disk")
+	})
 }
 
 // The store's guarantees matter: with fsync skipped (a store that returns
