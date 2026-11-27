@@ -268,3 +268,44 @@ on the main loop without it. Handing any heartbeat that would change the
 term or the state to the main loop (`rpcCh`), as suggested above, fixes
 every seed we have; the fast path keeps handling the common heartbeat
 (same term, follower).
+
+---
+
+<!-- FIFTH DRAFT: a comment on #612, not a new issue. Not posted; Prince decides. -->
+
+# Comment on #612: root cause (a deadlock in pipelined replication after a rejected append)
+
+We can reproduce this, and we think we found the cause.
+
+When a follower rejects a pipelined `AppendEntries` (here because its log
+store failed one `StoreLogs`, as yours did), `pipelineDecode` returns. From
+then on nothing reads the pipeline's `doneCh`:
+
+1. `netPipeline.decodeResponses` decodes the next response and blocks
+   handing it to `doneCh`, so it stops taking requests from `inprogressCh`.
+2. The replication goroutine is inside `pipelineSend`, blocked in
+   `netPipeline.AppendEntries` handing its next request to `inprogressCh`.
+   With the default `MaxRPCsInFlight` (2) both channels are unbuffered.
+3. It never gets back to the `select` in `pipelineReplicate` that would
+   notice `finishCh` was closed, so `pipeline.Close()` (deferred after that
+   loop) never runs, and neither side is ever released.
+
+The leader never sends that follower entries again; heartbeats run in
+their own goroutine and carry on, which matches what you saw. A second
+symptom: the leader's `Shutdown` never returns, since it waits for that
+replication goroutine.
+
+Reproduction with the library's own pieces (three servers on
+`NewTCPTransport`, entries applied without pause, a wrapper store whose
+`StoreLogs` fails once on one follower): the follower stalls for good in 4
+of 5 tries, and `Shutdown` hangs each time; a goroutine dump shows the two
+goroutines above.
+
+A minimal fix: have `pipelineDecode` close the pipeline as it exits
+(`defer p.Close()`); `Close` is idempotent, it releases (closes) the
+connection, and it unblocks both `AppendEntries` and `decodeResponses`, so
+`pipelineSend` returns an error and replication falls back to plain RPCs.
+With it: 0 of 5 stalls.
+
+(Found with deterministic simulation testing, go-dst-kit, injecting disk
+errors into the log store.)

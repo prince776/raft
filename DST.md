@@ -528,9 +528,17 @@ line.
 
 Fix (switch `pipeline-close-on-abort`, in `knownFixes`): the decoder closes
 the pipeline as it exits, which unblocks both sides; replication falls
-back to plain RPCs. Seed 240 passes with it. Upstream-style reproduction:
-a todo (it needs pipelining over a real transport and a store failing one
-append).
+back to plain RPCs. Seed 240 passes with it.
+
+Outside the simulation, `TestPipelineStall` (`dst_boundary_scripted_test.go`,
+raft's own pieces: three servers over real TCP, pipelined replication at
+the default `MaxRPCsInFlight`, entries applied without pause, one
+follower's `StoreLogs` failing once): the follower stalls for good in 4 of
+5 tries on correct raft, and in each of them the leader's `Shutdown` never
+returns either (it waits for the stuck replication goroutine); the
+goroutine dump shows `pipelineSend` inside `netPipeline.AppendEntries` and
+the same pipeline's `decodeResponses`, both blocked a minute. With the fix:
+0 of 5.
 
 ### 6.17 InstallSnapshot keeps a log that conflicts with the snapshot (safety; upstream #697, rule 7)
 

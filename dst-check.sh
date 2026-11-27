@@ -21,6 +21,7 @@ full)
 	go vet . && go vet -tags dstbugs .
 	go test -count=1 -timeout 0 -run 'TestDST' . -dst.seeds=200
 	go test -tags dstbugs -count=1 -timeout 0 -run "^($scripted)\$" .
+	go test -tags dstbugs -count=1 -timeout 600s -run '^TestPipelineStall$' .  # real TCP, real time: ~1 min
 	go test -tags dstbugs -count=1 -timeout 0 -run '^(TestDSTMembershipFixed|TestDSTMembershipGrayFixed|TestDSTSnapshotBoundary|TestDSTDiskErrorsFixed)$' . -dst.seeds=400
 	;;
 *)

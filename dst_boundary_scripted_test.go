@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -442,5 +443,162 @@ func TestRemovedServerCampaigns(t *testing.T) {
 			t.Errorf("%s: the server never came back with a higher term", c.name)
 		}
 		t.Logf("%s: disrupted on %d of %d seeds", c.name, disrupted, rep.Runs)
+	}
+}
+
+// failOnceStore is an InmemStore whose StoreLogs fails once, after armed.
+type failOnceStore struct {
+	*InmemStore
+	armed, failed atomic.Bool
+}
+
+func (s *failOnceStore) StoreLogs(logs []*Log) error {
+	if s.armed.Load() && s.failed.CompareAndSwap(false, true) {
+		return fmt.Errorf("injected: store failure")
+	}
+	return s.InmemStore.StoreLogs(logs)
+}
+
+func (s *failOnceStore) StoreLog(l *Log) error { return s.StoreLogs([]*Log{l}) }
+
+// pipelineStall runs three servers over real TCP (pipelined replication,
+// the default MaxRPCsInFlight), applies entries without pause, makes one
+// follower's log store fail one StoreLogs, and reports whether that
+// follower then stopped receiving entries for 3s while the leader went on
+// committing (DST.md 6.16, upstream #612).
+func pipelineStall(t *testing.T) (stalled, shutdownHung bool) {
+	conf := inmemConfig(t)
+	var rafts []*Raft
+	var stores []*failOnceStore
+	var servers []Server
+	var transports []*NetworkTransport
+	for i := 0; i < 3; i++ {
+		trans, err := NewTCPTransport("127.0.0.1:0", nil, 3, time.Second, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		transports = append(transports, trans)
+		servers = append(servers, Server{ID: ServerID(fmt.Sprintf("s%d", i)), Address: trans.LocalAddr()})
+	}
+	for i := 0; i < 3; i++ {
+		c := *conf
+		c.LocalID = servers[i].ID
+		store := &failOnceStore{InmemStore: NewInmemStore()}
+		stores = append(stores, store)
+		snaps := NewInmemSnapshotStore()
+		if err := BootstrapCluster(&c, store, store, snaps, transports[i], Configuration{Servers: servers}); err != nil {
+			t.Fatal(err)
+		}
+		r, err := NewRaft(&c, &MockFSM{}, store, store, snaps, transports[i])
+		if err != nil {
+			t.Fatal(err)
+		}
+		rafts = append(rafts, r)
+	}
+	// Shut down with a bound: a stalled replication goroutine also keeps
+	// Shutdown from returning (it waits for raft's goroutines).
+	defer func() {
+		ch := make(chan struct{})
+		go func() {
+			for _, r := range rafts {
+				r.Shutdown().Error()
+			}
+			close(ch)
+		}()
+		select {
+		case <-ch:
+		case <-time.After(5 * time.Second):
+			shutdownHung = true
+		}
+	}()
+	var leader *Raft
+	for i := 0; i < 300 && leader == nil; i++ {
+		time.Sleep(10 * time.Millisecond)
+		for _, r := range rafts {
+			if r.State() == Leader {
+				leader = r
+			}
+		}
+	}
+	if leader == nil {
+		t.Fatal("no leader")
+	}
+	stop := make(chan struct{})
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for i := 0; ; i++ {
+			select {
+			case <-stop:
+				return
+			default:
+			}
+			leader.Apply([]byte(fmt.Sprintf("x%d", i)), time.Second)
+		}
+	}()
+	defer func() {
+		close(stop)
+		select {
+		case <-done:
+		case <-time.After(5 * time.Second):
+		}
+	}()
+	var follower int
+	for i, r := range rafts {
+		if r != leader {
+			follower = i
+			break
+		}
+	}
+	time.Sleep(300 * time.Millisecond)
+	stores[follower].armed.Store(true)
+	// Watch: after the failure, does the follower's log move again?
+	deadline := time.Now().Add(6 * time.Second)
+	for !stores[follower].failed.Load() && time.Now().Before(deadline) {
+		time.Sleep(5 * time.Millisecond)
+	}
+	if !stores[follower].failed.Load() {
+		t.Fatal("test setup: the follower's store never failed")
+	}
+	time.Sleep(200 * time.Millisecond)
+	before, _ := stores[follower].LastIndex()
+	leaderBefore := leader.getLastIndex()
+	time.Sleep(3 * time.Second)
+	after, _ := stores[follower].LastIndex()
+	if leader.getLastIndex() <= leaderBefore {
+		t.Fatal("test setup: the leader stopped committing")
+	}
+	return after == before, false
+}
+
+// TestPipelineStall (DST.md 6.16, upstream #612): after a follower rejects a
+// pipelined append (its store failed once), correct raft can stop sending it
+// entries for good; with pipeline-close-on-abort it never does. Real TCP and
+// real time, so it repeats: correct raft must stall at least once in 5
+// tries, the fix never in 5.
+//
+// Fails if: correct raft never stalls (nothing to show), or the fix stalls.
+func TestPipelineStall(t *testing.T) {
+	defer func() { activeBug = "" }()
+	activeBug = ""
+	stalls, hung := 0, 0
+	for i := 0; i < 5; i++ {
+		s, h := pipelineStall(t)
+		if s {
+			stalls++
+		}
+		if h {
+			hung++
+		}
+	}
+	if stalls == 0 {
+		t.Errorf("correct raft never stalled in 5 tries")
+	}
+	t.Logf("correct raft: the follower stalled in %d of 5 tries; Shutdown hung in %d", stalls, hung)
+	activeBug = "pipeline-close-on-abort"
+	for i := 0; i < 5; i++ {
+		if s, h := pipelineStall(t); s || h {
+			t.Errorf("with the fix, try %d: stalled %v, Shutdown hung %v", i+1, s, h)
+		}
 	}
 }
