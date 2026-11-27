@@ -318,6 +318,35 @@ gray sweeps use those. The same lesson appeared in go-dst-kit's own
 examples: three of them lose liveness under gray failure, by fixed
 timeouts shorter than a slow path.
 
+### 6.9 A configuration entry can commit by the old configuration (minor, not a bug in raft's model)
+
+The Raft thesis (§4.1) says a server uses a configuration as soon as it is
+in its log, so the entry that changes the configuration is committed by a
+majority of the *new* configuration. hashicorp's leader stores the entry
+and counts its own write (`dispatchLogs` calls `commitment.match`) before
+it switches the commit tracker to the new configuration
+(`setConfiguration`). With one voter, that count already makes a majority
+of the old configuration: adding a second voter to a one-voter cluster
+commits at once, held by the leader alone, while the new configuration
+says two voters. With more voters the leader's own write is never a
+majority, so only this case is affected. Within raft's model it is
+harmless: if the leader is lost the cluster is dead either way (it was its
+only voter), and every later entry is counted by the new configuration.
+Found by the white-box commit check (6.10), which accepts it.
+
+### 6.10 The commit-rule check
+
+`a leader commits only what a majority stores` (dst_checks_test.go): when
+a leader moves its commit index to i, a majority of the voters of a
+configuration it held since its last commit move must durably store its
+entry i (or a snapshot covering it). It catches quorum-off-by-one from the
+first seeds of the 4-node and membership sweeps; every default sweep
+passes. Its first three versions flagged correct raft, each time the
+check's fault: the commit index reaches the leader loop steps after the
+count (the configuration can change in between); 6.9; and a new leader's
+commit index is learned while following, so only its own moves are
+judged.
+
 ## 7. The bug benchmark
 
 `dstbench.json`: bugs behind switches (`bug(name)` in `dstbugs*.go`, only
