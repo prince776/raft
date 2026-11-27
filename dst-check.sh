@@ -9,7 +9,7 @@
 set -e
 export GOTOOLCHAIN=go1.25.0 GOMAXPROCS=${GOMAXPROCS:-4}
 cd "$(dirname "$0")"
-scripted='TestDSTChecksCatchBugs|TestDSTStaleConfigStall|TestDSTQuorumOffByOneScripted|TestBootstrapCrash|TestSnapshotBoundaryScripted|TestSnapshotFallbackGap|TestRemovedServerCampaigns|TestDSTCatchesEntryAppliedTwice'
+scripted='TestDSTChecksCatchBugs|TestDSTStaleConfigStall|TestDSTQuorumOffByOneScripted|TestBootstrapCrash|TestSnapshotBoundaryScripted|TestSnapshotFallbackGap|TestRemovedServerCampaigns|TestDSTManualRecovery|TestDSTCatchesEntryAppliedTwice'
 case "${1:-quick}" in
 quick)
 	go vet . && go vet -tags dstbugs .

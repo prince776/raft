@@ -175,6 +175,10 @@ func (iv *invariants) completeness(c *simCluster) error {
 // invariantChecks registers one check per invariant.
 func (c *simCluster) invariantChecks() {
 	iv := c.inv
+	// After a manual recovery only the recovered server's log and logs
+	// copied from it remain (the other survivors rejoin wiped; the lost
+	// never write again), and it may reuse a lost server's term.
+	c.onManualRecovery = append(c.onManualRecovery, func() { clear(iv.entries) })
 	c.h.Always("logs match", func() error { return iv.logsErr })
 	c.h.Always("one vote per term", func() error { return iv.voteErr })
 	c.h.Always("terms never go back", func() error { return iv.terms(c) })

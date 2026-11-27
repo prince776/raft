@@ -252,7 +252,7 @@ shutting down`. It stays in the configuration as a non-voter that no longer
 takes part. A follower that's demoted doesn't. Not a safety problem;
 possibly unintended.
 
-### 6.4 quorum-off-by-one (upstream 163a55f) is invisible inside raft's model
+### 6.4 quorum-off-by-one (upstream 163a55f) is invisible inside raft's model (until an operator recovers an outage: phase 2 step 5)
 
 The bug computes the commit index as the median of the sorted match
 indexes rounded up, so an even configuration commits on half its voters (2
@@ -486,6 +486,20 @@ counted (`a re-elected leader refused writes for good (6.14)`). Planted
 `transfer-flag-sticks` (the flag never cleared) is caught by "the cluster
 recovers" in half the seeds that draw transfers.
 
+### 6.15 RecoverCluster keeps the server's stored term (a hazard, not a bug)
+
+Found while building phase 2 step 5. `RecoverCluster` forces a
+configuration on the server it runs on but leaves its current term as
+stored, so the recovered cluster's first election may reuse a term a lost
+server led, and write different entries under it (seen on 2 of 50 seeds:
+two leaders of term 3; entry 13 of term 3 with two payloads). Harmless
+while the lost servers stay lost, which is the procedure's premise. If one
+was only unreachable and comes back (an operator's mistake), its log and
+the cluster's agree on an (index, term) with different entries: Log
+Matching breaks, and raft can't notice. A defensive option for upstream:
+let `RecoverCluster` take a term at least as high as any the operator saw
+(or bump the stored term by a margin), so recovered terms never collide.
+
 ## 7. The bug benchmark
 
 `dstbench.json`: bugs behind switches (`bug(name)` in `dstbugs*.go`, only
@@ -591,11 +605,9 @@ should fail), measured after each phase.
   upstream fixes the bugs)?
 - The commit-rule check (6.10) takes quorum-off-by-one from 0 to 300 of
   300 four-node seeds and 273 of 300 membership seeds (dstbench).
-- quorum-off-by-one end to end: an operator doing manual outage recovery
-  (`RecoverCluster`, as `peers.json` in Consul and Nomad) after losing a
-  majority for good would expose it within raft's model (with the bug, the
-  survivors may lack an acknowledged write). Proposed as a phase 2
-  scenario.
+- ~~quorum-off-by-one end to end~~: done in phase 2 step 5
+  (`TestDSTManualRecovery`): with manual outage recovery it loses
+  acknowledged writes inside raft's model.
 
 ### Item 4: clients on their own machines (as built)
 
@@ -862,6 +874,31 @@ the cluster can replicate to it); the test requires a voter leader that
 then holds its term for 2s and the demoted server caught up as a
 non-voter. With pre-vote on, nothing is disrupted in any row: pre-vote
 alone covers #524 when the transport supports it.
+
+### Step 5a: manual outage recovery (as built)
+
+`TestDSTManualRecovery` (`dst_bugs_test.go`, the dstbugs build): an even
+cluster (4 or 6 voters, drawn configuration, clients on their own
+machines) runs under crashes and network faults; midway it splits in half
+(the leader's half with the clients) and that half is then lost for good,
+a site lost. An operator recovers by RecoverCluster's safe procedure: the
+most up to date survivor (last term, then index) recovered as the sole
+voter (`peers.json`), the other survivors rejoining with clean disks.
+Losing half of an even cluster is the case where recovery is needed
+(survivors short of a quorum) and every acknowledged write is still
+guaranteed (each is on a quorum, n/2+1, and the most up to date survivor
+holds every committed entry); for odd n the two never coincide.
+
+- Correct raft: 50 of 50 seeds keep every acknowledged write.
+- quorum-off-by-one (the white-box checks left out, `noWhiteBox`): 27 of
+  50 seeds lose acknowledged writes or break linearizability. Until now
+  the bug needed amnesia to do harm (6.4).
+
+Two lessons on the way. Recovering every survivor from its own log (the
+doc's "typical" way) commits each one's uncommitted tail, and can diverge
+their state machines, as the doc warns (1 of 50 seeds). And a recovery
+reuses terms (6.15), so the checks with history (one leader per term,
+logs match) start afresh at a manual recovery.
 
 ## 11. How to run
 

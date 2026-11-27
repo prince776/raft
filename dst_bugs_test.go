@@ -5,6 +5,7 @@ package raft
 import (
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -389,4 +390,140 @@ func TestDSTCatchesEntryAppliedTwice(t *testing.T) {
 		t.Fatalf("%d of %d seeds failed, none by the FSM's index check", len(rep.Failed), rep.Runs)
 	}
 	t.Logf("caught on %d of %d seeds", caught, rep.Runs)
+}
+
+// manualRecoveryScript (phase 2 step 5): an even cluster (4 or 6 voters)
+// runs its workload under crashes and network faults; midway, half of it
+// is lost for good, so the survivors can't elect a leader, and an operator
+// recovers by raft's safe procedure (RecoverCluster's doc): the most up to
+// date survivor (by last term, then index) is recovered as the sole voter
+// (peers.json in Consul and Nomad), and the other survivors rejoin with
+// clean disks. Recovering every survivor from its own log, the "typical"
+// way, commits each one's uncommitted tail and can diverge them, as the
+// doc warns (the first version of this script did, on 1 of 50 seeds).
+//
+// Losing half of an even cluster, every committed entry is on a quorum
+// (n/2+1), and the most up to date survivor holds all of them (a later
+// leader's log extends every committed entry), so every acknowledged
+// write must survive.
+func manualRecoveryScript(noWhiteBox bool) func(h *dsttest.Harness) {
+	return func(h *dsttest.Harness) {
+		n := []int{4, 6}[h.World().Rand().Stream("cluster size").IntN(2)]
+		c := newCluster(h, clusterSpec{voters: n, drawConfig: true, clients: 2, noWhiteBox: noWhiteBox})
+		h.Go(func(w *dst.World) {
+			w.Sleep(time.Duration(1500+w.Rand().IntN(1500)) * time.Millisecond)
+			// The outage: the cluster splits in half, the leader's half with
+			// the clients, and then that half is lost for good (a site
+			// lost). Correct raft can't commit on half; every write the
+			// leader's half acknowledges is on a quorum, so on a survivor.
+			var l *dstNode
+			for l == nil {
+				l = c.leader()
+				if l == nil {
+					w.Sleep(20 * time.Millisecond)
+				}
+			}
+			lostSide := []*dstNode{l}
+			for _, i := range w.Rand().Perm(n) {
+				if nd := c.nodes[i]; nd != l && len(lostSide) < n/2 {
+					lostSide = append(lostSide, nd)
+				}
+			}
+			var a, b []string
+			var survivors []*dstNode
+			for _, m := range h.Machines() {
+				a = append(a, m.Name())
+			}
+			a = slices.DeleteFunc(a, func(name string) bool {
+				nd := c.node(ServerID(name))
+				if nd != nil && !slices.Contains(lostSide, nd) {
+					b = append(b, name)
+					survivors = append(survivors, nd)
+					return true
+				}
+				return false
+			})
+			h.Partition(a, append(b, "test"))
+			w.Sleep(time.Duration(200+w.Rand().IntN(600)) * time.Millisecond)
+			for _, nd := range lostSide {
+				nd.m.Lose()
+			}
+			h.Heal()
+			best := survivors[0]
+			for _, nd := range survivors[1:] {
+				i, t := nd.raft.getLastEntry()
+				bi, bt := best.raft.getLastEntry()
+				if t > bt || (t == bt && i > bi) {
+					best = nd
+				}
+			}
+			c.recover = map[string]Configuration{best.name: {Servers: []Server{{ID: best.id(), Address: best.addr()}}}}
+			for _, nd := range survivors {
+				nd.wipeOnBoot = nd != best
+				if !nd.m.Dead() {
+					nd.m.Crash()
+				}
+				nd.m.Restart()
+			}
+			// Rejoin the others once the recovered server leads.
+			deadline := w.Now().Add(2 * c.patience())
+			for _, nd := range survivors {
+				if nd == best {
+					continue
+				}
+				for {
+					if w.Now().After(deadline) {
+						h.Fail(fmt.Errorf("script: %s couldn't rejoin through %s:\n%s", nd.name, best.name, c.describe()))
+						return
+					}
+					if best.up() && best.raft.State() == Leader {
+						if err := best.raft.AddVoter(nd.id(), nd.addr(), 0, time.Second).Error(); err == nil {
+							break
+						}
+					}
+					w.Sleep(50 * time.Millisecond)
+				}
+			}
+			h.Sometimes("the script ran")
+		})
+		h.Expect("the script ran", "a server was recovered by hand")
+	}
+}
+
+// TestDSTManualRecovery (phase 2 step 5): manual outage recovery keeps
+// every acknowledged write when half of an even cluster is lost, and
+// quorum-off-by-one (upstream 163a55f: committing on half of an even
+// configuration) loses some, seen end to end, inside raft's fault model.
+// The white-box checks (the commit rule, 6.10, and Raft's invariants)
+// catch that bug first, so the bug's run leaves them out to show the
+// end-to-end view.
+//
+// Fails if: correct raft loses an acknowledged write or fails otherwise
+// on any seed, or quorum-off-by-one loses none on any seed.
+func TestDSTManualRecovery(t *testing.T) {
+	defer func() { activeBug = "" }()
+	o := dstOpts(dsttest.Faults{Crash: true, Network: true})
+	o.Seeds, o.KeepGoing, o.DeterminismChecks = 50, true, -1
+	activeBug = ""
+	if rep := dsttest.Sweep(o, manualRecoveryScript(false)); !rep.OK() {
+		t.Fatalf("correct raft: %d of %d seeds failed; the first: %v", len(rep.Failed), rep.Runs, rep.Failed[0].Err)
+	} else {
+		t.Logf("correct raft: %d of %d seeds pass", rep.Runs, rep.Runs)
+	}
+	activeBug = "quorum-off-by-one"
+	rep := dsttest.Sweep(o, manualRecoveryScript(true))
+	lost := 0
+	for _, r := range rep.Failed {
+		if strings.Contains(r.Err.Error(), `"acknowledged writes survive"`) || strings.Contains(r.Err.Error(), `"the clients' history is linearizable"`) {
+			lost++
+		}
+	}
+	if lost == 0 {
+		first := "none"
+		if len(rep.Failed) > 0 {
+			first = rep.Failed[0].Err.Error()
+		}
+		t.Fatalf("quorum-off-by-one: no seed lost an acknowledged write (%d of %d failed otherwise; the first: %.300s)", len(rep.Failed), rep.Runs, first)
+	}
+	t.Logf("quorum-off-by-one: %d of %d seeds lost acknowledged writes or broke linearizability (%d failed in all)", lost, rep.Runs, len(rep.Failed))
 }

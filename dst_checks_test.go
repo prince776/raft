@@ -26,6 +26,10 @@ func (c *simCluster) checks() {
 	// Election safety: at most one leader per term, ever (a crashed node's
 	// raft keeps its last state, so only running nodes count).
 	leaders := map[uint64]string{}
+	// A manual recovery (RecoverCluster) forces a configuration without a
+	// quorum: the recovered server's next election may reuse a term a lost
+	// server led. Election safety holds again from there.
+	c.onManualRecovery = append(c.onManualRecovery, func() { clear(leaders) })
 	h.Always("at most one leader per term", func() error {
 		for _, nd := range c.nodes {
 			if !nd.up() || nd.raft.getState() != Leader {
@@ -80,7 +84,7 @@ func (c *simCluster) checks() {
 	checkedCommit := map[string]uint64{} // leader -> commit index last checked
 	held := map[string][]Configuration{} // leader -> latest configurations since its last commit move
 	heldTerm := map[string]uint64{}
-	h.Always("a leader commits only what a majority stores", func() error {
+	commitRule := func() error {
 		for _, nd := range c.nodes {
 			if !nd.up() || nd.raft.getState() != Leader {
 				continue
@@ -136,7 +140,10 @@ func (c *simCluster) checks() {
 			}
 		}
 		return nil
-	})
+	}
+	if !c.spec.noWhiteBox {
+		h.Always("a leader commits only what a majority stores", commitRule)
+	}
 	h.Final("the cluster recovers", func(w *dst.World) error { return c.recovers(w) })
 	h.Final("every member catches up", func(w *dst.World) error { return c.catchesUp(w) })
 	h.Final("the clients' history is linearizable", func(w *dst.World) error {

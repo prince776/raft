@@ -40,6 +40,9 @@ type clusterSpec struct {
 	// drawConfig draws raft's configuration per seed (raftKnobs), the
 	// same on every node; otherwise it is dstConfig's, fixed.
 	drawConfig bool
+	// noWhiteBox leaves out the white-box checks (the commit rule and
+	// Raft's invariants), to show what the end-to-end checks see alone.
+	noWhiteBox bool
 	// preVoteOff: elections without the pre-vote round (fixed
 	// configuration; a drawn one draws it).
 	preVoteOff bool
@@ -140,6 +143,14 @@ type simCluster struct {
 	op    *operator  // nil unless spec.operator
 	knobs *raftKnobs // the drawn configuration (nil unless spec.drawConfig)
 	inv   *invariants
+	// recover: servers an operator recovers by hand at their next boot
+	// (RecoverCluster, as peers.json in Consul), with that configuration.
+	recover map[string]Configuration
+	// onManualRecovery reset the checks' histories that a manual recovery
+	// ends (RecoverCluster forces a configuration without a quorum, and
+	// the recovered server keeps its stored term: it may reuse a term a
+	// lost server led, with different entries).
+	onManualRecovery []func()
 	// transfer: the leader hands leadership on now and then (a per-seed
 	// feature, dst_transfer_test.go).
 	transfer bool
@@ -238,7 +249,9 @@ func newCluster(h *dsttest.Harness, spec clusterSpec) *simCluster {
 	h.OnPanic(func(v any) bool { return diskError(fmt.Errorf("%v", v)) })
 	c.inv = newInvariants()
 	c.checks()
-	c.invariantChecks()
+	if !spec.noWhiteBox {
+		c.invariantChecks()
+	}
 	return c
 }
 
@@ -326,6 +339,19 @@ func (c *simCluster) boot(nd *dstNode, w *dst.World, initial []Server) {
 		if !retry("bootstrap", bootstrap) {
 			return
 		}
+	}
+	if cfg, ok := c.recover[nd.name]; ok {
+		// Manual outage recovery: the operator forces the configuration.
+		if !retry("recover the cluster", func() error {
+			return RecoverCluster(conf, newKVFSM(h), nd.logs, nd.logs, nd.snaps, trans, cfg)
+		}) {
+			return
+		}
+		delete(c.recover, nd.name)
+		for _, f := range c.onManualRecovery {
+			f()
+		}
+		h.Sometimes("a server was recovered by hand")
 	}
 	nd.fsm = newKVFSM(h)
 	// Restoring a snapshot can fail on a read error; raft then reports
