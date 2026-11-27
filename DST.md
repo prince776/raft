@@ -73,11 +73,24 @@ phase; drawing them per seed is planned. A run has a 10s fault phase and a
 | Loss | A machine dies for good, with its disk; the test is told (a ticket) and replaces it |
 | Gray (new) | Gray failure, shares drawn per seed: slow links (+5ms to 300ms per write), lossy links (1% to 20% of segments lost, each stalling the stream for a retransmission timeout, 200ms doubling to 3.2s), connections reset when a partition heals, slow machines (stalls of 2 to 50ms every 10 to 100ms), slow disks (fsync 10 to 100x slower). Slow links and disks stay slow in the recovery phase; the rest stop |
 
-**The store's contract** (`dstLogStore`, written down because raft's
-interfaces don't state one): every call is fsynced before it returns; each
-call is one checksummed record (all or nothing); on open, a torn final
-record is truncated. Weaker modes for experiments: `noSync`,
-`splitBatches`.
+**The store's contract** (`dstLogStore`). Raft's `LogStore` and
+`StableStore` interfaces don't say what a store must guarantee, so we
+stated one from the caller's side, then weakened it one guarantee at a
+time to learn which raft needs (6.6):
+
+1. Durable on return: once a call returns without error, its effect
+   survives any later crash. Raft needs this.
+2. A crash during a call keeps a prefix of the call's entries (all, some
+   first ones, or none), never a gap. Raft needs no more: keeping a batch
+   whole isn't required.
+3. Reads see every completed call; a missing key reads as 0 and an empty
+   log has first and last index 0 (raft relies on both; its docs don't
+   say so).
+
+The store provides these by fsyncing before it returns and writing each
+call as one checksummed record (a torn one is cut off on open). The
+weaker modes `noSync` and `splitBatches` break 1 and the whole-batch part
+of 2.
 
 **Raft's fault model, and what's out of it.** hashicorp/raft assumes
 crash-recovery with reliable storage: a node's storage holds everything it
@@ -194,6 +207,15 @@ added for (#524); that the fix keeps that protection is argued, not
 measured. A scenario for #524 (a node that missed configuration changes,
 campaigning) belongs to phase 2.
 
+**Upstream-ready:** branch `fix/stale-config-vote` (based on upstream
+`main`, `dd4346d`; nothing from the simulation) with the fix and two tests
+in raft's style: `TestRaft_StaleVoterCanElectNewerVoter` (the sequence on
+`MakeCluster`, with and without pre-vote; fails 3 of 3 before the fix,
+passes 20 of 20 after) and
+`TestRaft_VoteGranted_WhenCandidateLogAheadOfStaleConfiguration` (direct
+RPCs: same log, behind, ahead by index, ahead by term). Upstream's suite
+passes. A write-up with diagrams: `docs/dst-bugs.html`.
+
 It also happens without a scripted partition: under gray failure
 (the membership sweep under gray failure, seed 175), a voter lagging behind lossy links kept
 a configuration without the candidate and rejected it (`node is not in
@@ -206,16 +228,21 @@ removed recover that seed.
 the node crashes between the two, on restart `HasExistingState` sees the
 term and says the node has state, so bootstrapping again fails with
 `ErrCantBootstrap`; and the node has no configuration, so it never
-campaigns. A single-voter cluster is stuck for good (and a multi-voter
-one has lost that voter) until someone wipes the node's data. The window
-is short (one write) and once per node, so low severity.
+campaigns. In a multi-voter cluster that heals itself (a leader elected by
+the others replicates the log and configuration to it); it is permanent
+where the node is needed for a majority, above all a single-voter
+cluster, until someone wipes the node's data. The window is short (one
+write) and once per node, so low severity.
 
 Found by the gray sweep (seed 54: a slow disk widened the window, and the
 cluster's only voter crashed in it). `TestBootstrapCrash` shows it directly
-(a store whose StoreLog fails after the term was saved). Fix: write the
+(a store whose StoreLog fails after the term was saved). Upstream-ready:
+branch `fix/bootstrap-crash` with `TestBootstrapCluster_CrashBetweenWrites`
+(fails before the fix). Fix: write the
 configuration entry first, then the term (switch `bootstrap-log-first`): a
 crash between them leaves a log whose configuration raft uses on start;
-the seed recovers and the test passes. Not yet in the upstream draft.
+the seed recovers and the test passes. It is in the upstream draft as a
+second item.
 
 ### 6.3 A demoted leader shuts down
 
@@ -364,15 +391,41 @@ exploration is; 4. guided exploration. Phase 1 items:
 6. Clock extremes (large drift, jumps)
 7. Timeouts drawn per seed, raft's defaults included
 
-Open decisions for Prince:
+### Antithesis's open reports: a benchmark from outside
 
-- Add the white-box check "a leader never commits before a majority
-  stores it" to the regular sweeps (it would catch quorum-off-by-one in
-  every 4-node run)? Recommendation: in the sweeps, not the benchmark.
+Antithesis filed four reports on hashicorp/raft in 2026, all open, so the
+bugs should be in the code we test. Finding them with our sweeps is the
+benchmark that matters most: real bugs, found by someone else, not
+re-inserted by us. None of our sweeps finds them yet, and each points at
+a gap:
+
+| Report | Bug | Why we miss it today | Needed |
+|---|---|---|---|
+| [#695](https://github.com/hashicorp/raft/issues/695) | Heartbeats handled on the transport goroutine bump the term concurrently with the leader loop: logs diverge (safety) | Our checks would see divergence; the interleaving is rare under seed sweeps | Phase 2: Raft's invariants checked every step (Log Matching, Leader Completeness); phase 3-4: exploration |
+| [#696](https://github.com/hashicorp/raft/issues/696) | An interrupted leadership transfer leaves "leadership transfer in progress" set: the re-elected leader refuses writes (liveness) | The workload never transfers leadership | Phase 2: leadership transfers in the workload |
+| [#697](https://github.com/hashicorp/raft/issues/697) | InstallSnapshot keeps a conflicting log suffix (Figure 13 rule 7): a follower loops on snapshots (liveness) | "The cluster recovers" only needs the leader to commit; "same sequence" accepts a follower stuck on a prefix | Phase 2: every node converges after the faults; phase 1 item 3: snapshots on the simulated disk |
+| [#746](https://github.com/hashicorp/raft/issues/746) | `persistVote` writes term and candidate as two writes; a crash between them lets a stale vote skip the log check (safety) | Needs pre-vote off; our config never turns it off | Phase 1 item 7: draw the configuration per seed (pre-vote on or off); the crash class is the one that found 6.2 |
+
+Plan: these join the benchmark as "live" entries (no switch: correct raft
+should fail), measured after each phase.
+
+### Open decisions for Prince
+
+- ~~White-box check "a leader never commits before a majority stores
+  it"~~: approved (2026-11-27), white-box checks in general welcome for
+  phase 2.
 - File the upstream issue for 6.1 ([draft](UPSTREAM-ISSUE-DRAFT.md))? And
   6.2, in it or separately?
-- go-dst-kit's examples under gray failure: make their timeouts adaptive
-  and give each a gray sweep, or leave them?
+- ~~go-dst-kit's examples under gray failure~~: approved, Gray goes into
+  AllFaults and the examples get fixed.
+- Membership under gray failure lives in the dstbugs build with both
+  fixes on; keep it there, or put it in the default suite (red until
+  upstream fixes the bugs)?
+- quorum-off-by-one end to end: an operator doing manual outage recovery
+  (`RecoverCluster`, as `peers.json` in Consul and Nomad) after losing a
+  majority for good would expose it within raft's model (with the bug, the
+  survivors may lack an acknowledged write). Proposed as a phase 2
+  scenario.
 
 ### Item 2: slow and stale components (design)
 

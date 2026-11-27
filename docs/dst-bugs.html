@@ -1,0 +1,457 @@
+<title>Three hashicorp/raft Bugs</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;600&family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap">
+<style>
+/* Layout: one reading column (~68ch) with full-width figures; each bug is a chapter with the same five parts. */
+:root {
+  --bg: #f5f7fa;
+  --surface: #ffffff;
+  --fg: #18212d;
+  --muted: #566274;
+  --line: #d5dce6;
+  --accent: #1d5fd1;      /* the fix, the change being discussed */
+  --accent-soft: #e3ecfb;
+  --bad: #c0392b;         /* what fails */
+  --bad-soft: #fbe9e7;
+  --good: #1e7b4d;        /* what recovers */
+  --good-soft: #e3f3ea;
+  --code-bg: #eef2f7;
+  --font-display: "Space Grotesk", "Segoe UI", system-ui, sans-serif;
+  --font-body: "Inter", "Segoe UI", system-ui, -apple-system, sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #0f141b; --surface: #161d27; --fg: #e3e8ef; --muted: #9aa6b6; --line: #2c3746;
+    --accent: #6ea2ff; --accent-soft: #1a2b48; --bad: #ff7a6b; --bad-soft: #3a1d1a;
+    --good: #5fd39a; --good-soft: #15322a; --code-bg: #1c2532; color-scheme: dark;
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #0f141b; --surface: #161d27; --fg: #e3e8ef; --muted: #9aa6b6; --line: #2c3746;
+  --accent: #6ea2ff; --accent-soft: #1a2b48; --bad: #ff7a6b; --bad-soft: #3a1d1a;
+  --good: #5fd39a; --good-soft: #15322a; --code-bg: #1c2532; color-scheme: dark;
+}
+body { background: var(--bg); color: var(--fg); font-family: var(--font-body); font-size: 16px; line-height: 1.6; }
+.wrap { max-width: 860px; margin: 0 auto; padding-block: 48px 96px;
+  padding-left: max(16px, env(safe-area-inset-left, 0px)); padding-right: max(16px, env(safe-area-inset-right, 0px)); }
+.prose { max-width: 68ch; }
+h1, h2, h3 { font-family: var(--font-display); line-height: 1.2; text-wrap: balance; margin: 0; }
+h1 { font-size: 2.2rem; font-weight: 600; }
+h2 { font-size: 1.6rem; font-weight: 600; }
+h3 { font-size: 1.1rem; font-weight: 600; margin-top: 2rem; }
+p, ul, ol { margin: 0.75rem 0 0; }
+li + li { margin-top: 0.3rem; }
+a { color: var(--accent); }
+a:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+code { font-family: var(--font-mono); font-size: 0.86em; background: var(--code-bg); padding: 0.1em 0.35em; border-radius: 4px; }
+pre { font-family: var(--font-mono); font-size: 0.84rem; line-height: 1.5; background: var(--code-bg); padding: 14px 16px; border-radius: 6px; overflow-x: auto; margin: 0.9rem 0 0; }
+pre code { background: none; padding: 0; }
+.lede { color: var(--muted); font-size: 1.05rem; margin-top: 0.75rem; }
+.toc { display: grid; grid-template-columns: repeat(auto-fit, minmax(230px, 1fr)); gap: 12px; margin-top: 28px; }
+.toc a { display: block; text-decoration: none; color: var(--fg); background: var(--surface); border: 1px solid var(--line); border-radius: 8px; padding: 14px 16px; min-width: 0; }
+.toc a:hover { border-color: var(--accent); }
+.toc .k { font-size: 0.75rem; letter-spacing: 0.06em; text-transform: uppercase; color: var(--muted); }
+.toc .t { font-family: var(--font-display); font-weight: 600; margin-top: 4px; }
+.toc .s { font-size: 0.85rem; color: var(--muted); margin-top: 4px; }
+section.bug { margin-top: 72px; padding-top: 32px; border-top: 1px solid var(--line); }
+.meta { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 12px; }
+.pill { font-size: 0.78rem; padding: 3px 10px; border-radius: 999px; border: 1px solid var(--line); color: var(--muted); }
+.pill.bad { color: var(--bad); border-color: var(--bad); }
+.pill.acc { color: var(--accent); border-color: var(--accent); }
+.aside { background: var(--surface); border: 1px solid var(--line); border-radius: 8px; padding: 14px 18px; margin-top: 1.2rem; }
+.aside h4 { font-family: var(--font-display); font-size: 0.95rem; margin: 0; }
+.aside p, .aside ul { font-size: 0.93rem; }
+figure { margin: 1.6rem 0 0; }
+.fig { overflow-x: auto; background: var(--surface); border: 1px solid var(--line); border-radius: 8px; padding: 12px; }
+.fig svg { display: block; width: 100%; min-width: 640px; height: auto; color: var(--fg); }
+figcaption { font-size: 0.88rem; color: var(--muted); margin-top: 8px; max-width: 68ch; }
+svg text { font-family: var(--font-body); font-size: 13px; fill: currentColor; }
+svg .mono { font-family: var(--font-mono); font-size: 12.5px; }
+svg .small { font-size: 11.5px; }
+svg .mut { fill: var(--muted); }
+svg .ln { stroke: currentColor; fill: none; stroke-width: 1.4; }
+svg .grid { stroke: var(--line); fill: none; stroke-width: 1; }
+svg .box { fill: var(--surface); stroke: var(--line); stroke-width: 1.2; }
+svg .box-acc { fill: var(--accent-soft); stroke: var(--accent); stroke-width: 1.4; }
+svg .box-bad { fill: var(--bad-soft); stroke: var(--bad); stroke-width: 1.4; }
+svg .box-good { fill: var(--good-soft); stroke: var(--good); stroke-width: 1.4; }
+svg .t-acc { fill: var(--accent); }
+svg .t-bad { fill: var(--bad); }
+svg .t-good { fill: var(--good); }
+svg .l-acc { stroke: var(--accent); fill: none; stroke-width: 2; }
+svg .l-bad { stroke: var(--bad); fill: none; stroke-width: 1.6; }
+svg .dash { stroke-dasharray: 5 4; }
+svg .head { fill: currentColor; }
+svg .head-acc { fill: var(--accent); }
+svg .head-bad { fill: var(--bad); }
+svg .part { fill: none; stroke: var(--bad); stroke-width: 1.4; stroke-dasharray: 6 4; }
+table { border-collapse: collapse; width: 100%; font-size: 0.92rem; margin-top: 1rem; }
+.tablewrap { overflow-x: auto; }
+th, td { text-align: left; padding: 8px 10px; border-bottom: 1px solid var(--line); vertical-align: top; }
+th { font-weight: 600; color: var(--muted); font-size: 0.8rem; letter-spacing: 0.04em; text-transform: uppercase; }
+td.num { font-variant-numeric: tabular-nums; white-space: nowrap; }
+.foot { margin-top: 72px; color: var(--muted); font-size: 0.88rem; }
+@media (prefers-reduced-motion: reduce) { * { transition: none !important; } }
+</style>
+
+<div class="wrap">
+<header class="prose">
+  <h1>Three hashicorp/raft Bugs</h1>
+  <p class="lede">What deterministic simulation testing found in hashicorp/raft, explained for someone who knows Raft from the paper but not this library: what goes wrong, why the code is the way it is, how the fix works, and how the simulation found, reproduced and checked each one.</p>
+</header>
+
+<nav class="toc" aria-label="The three bugs">
+  <a href="#stale-config"><div class="k">Bug 1 · liveness</div><div class="t">A majority that can never elect</div><div class="s">A lagging voter rejects the only candidate that could win. Fix and tests ready.</div></a>
+  <a href="#bootstrap"><div class="k">Bug 2 · liveness, low severity</div><div class="t">A crash inside bootstrap</div><div class="s">Two writes in the wrong order strand a new server. Fix and tests ready.</div></a>
+  <a href="#demoted-leader"><div class="k">Bug 3 · behaviour</div><div class="t">A demoted leader shuts down</div><div class="s">Demotion is treated as removal. A question for upstream.</div></a>
+</nav>
+
+<!-- ===================================================== BUG 1 -->
+<section class="bug" id="stale-config">
+  <div class="prose">
+    <h2>1. A live majority that can never elect a leader</h2>
+    <div class="meta"><span class="pill bad">Liveness, permanent</span><span class="pill">Since <code>6b4e320</code> (PR #526, 2022)</span><span class="pill acc">Branch <code>fix/stale-config-vote</code></span></div>
+
+    <div class="aside">
+      <h4>The Raft you need for this</h4>
+      <ul>
+        <li><strong>Elections.</strong> A server that hears nothing from a leader becomes a candidate for a new term and asks the others for votes. It wins with votes from a majority of the voters. Each server votes at most once per term.</li>
+        <li><strong>The election restriction</strong> (paper §5.4.1). A voter refuses a candidate whose log is less up to date than its own: compare the last entries' terms, then their indexes. This is what keeps committed entries safe across leader changes.</li>
+        <li><strong>Pre-vote</strong> (on by default here). Before a real election, a candidate asks "would you vote for me?" without raising anyone's term. Only if a majority says yes does it start the election. This stops a server that was cut off from disrupting the cluster when it comes back.</li>
+        <li><strong>Membership changes</strong> go through the log one server at a time: add a voter, add a non-voter, promote, demote, remove. A server uses the <em>latest</em> configuration in its own log, committed or not. So a server that missed some log entries also has an old idea of who the voters are.</li>
+      </ul>
+    </div>
+
+    <h3>What hashicorp added, and why</h3>
+    <p>Plain Raft never asks whether the candidate is a member: a voter checks the term and the logs, nothing else. In 2022 a user hit a problem (<a href="https://github.com/hashicorp/raft/issues/524">#524</a>). A server was removed or demoted while cut off, so it never learned it had lost its vote. It kept starting elections with ever higher terms, and the real cluster kept stepping down to follow those terms. <a href="https://github.com/hashicorp/raft/pull/526">PR #526</a> made each server reject a vote or pre-vote request from a candidate that isn't a voter in the receiver's latest configuration. For that case it works: the removed server is ignored.</p>
+    <p>The flaw: the receiver judges the candidate by <em>its own</em> latest configuration, and if the receiver is the one that's behind, that configuration is out of date.</p>
+
+    <h3>The sequence</h3>
+    <p>Everything in it is ordinary: one network partition, one routine replacement of a server (add the new one, then remove the old one), and one server that dies for good. The partition and the replacement are unrelated; they just overlap.</p>
+  </div>
+
+  <figure>
+    <div class="fig">
+      <svg viewBox="0 0 780 330" role="img" aria-label="Timeline: C is partitioned while A replaces B with D, so C still holds configuration A B C when A is lost and the partition heals, while D holds A C D.">
+        <defs>
+          <marker id="ar1" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="head"/></marker>
+        </defs>
+        <!-- column headers -->
+        <g text-anchor="middle">
+          <text x="134" y="24" font-weight="600">1. C cut off</text>
+          <text x="264" y="24" font-weight="600">2. D added</text>
+          <text x="394" y="24" font-weight="600">3. B removed</text>
+          <text x="524" y="24" font-weight="600">4. A lost</text>
+          <text x="684" y="24" font-weight="600">5. Partition heals</text>
+          <text x="264" y="42" class="small mut">committed by A, B, D</text>
+          <text x="394" y="42" class="small mut">committed by A, D</text>
+        </g>
+        <!-- row labels -->
+        <g font-weight="600">
+          <text x="20" y="90">A</text><text x="20" y="150">B</text><text x="20" y="210">C</text><text x="20" y="270">D</text>
+        </g>
+        <g class="small mut"><text x="36" y="90">leader</text></g>
+        <!-- row guides -->
+        <g class="grid">
+          <line x1="70" y1="114" x2="770" y2="114"/><line x1="70" y1="174" x2="770" y2="174"/><line x1="70" y1="234" x2="770" y2="234"/>
+        </g>
+        <!-- A -->
+        <g class="mono" text-anchor="middle">
+          <text x="134" y="90">{A,B,C}</text><text x="264" y="90">{A,B,C,D}</text><text x="394" y="90">{A,C,D}</text>
+          <text x="524" y="90" class="t-bad">✕ gone</text><text x="684" y="90" class="mut">gone</text>
+          <!-- B -->
+          <text x="134" y="150">{A,B,C}</text><text x="264" y="150">{A,B,C,D}</text><text x="394" y="150" class="mut">removed</text>
+          <text x="524" y="150" class="mut">removed</text><text x="684" y="150" class="mut">removed</text>
+          <!-- C -->
+          <text x="134" y="210">{A,B,C}</text><text x="264" y="210">{A,B,C}</text><text x="394" y="210">{A,B,C}</text><text x="524" y="210">{A,B,C}</text>
+          <text x="684" y="210" class="t-bad" font-weight="500">{A,B,C}  stale</text>
+          <!-- D -->
+          <text x="134" y="270" class="mut">not yet</text><text x="264" y="270">{A,B,C,D}</text><text x="394" y="270">{A,C,D}</text><text x="524" y="270">{A,C,D}</text>
+          <text x="684" y="270" class="t-acc" font-weight="500">{A,C,D}  newest log</text>
+        </g>
+        <!-- partition band around C, columns 1-4 -->
+        <rect x="74" y="188" width="512" height="34" rx="6" class="part"/>
+        <text x="330" y="246" text-anchor="middle" class="small t-bad">C is partitioned: it hears none of steps 2–4</text>
+        <!-- heal arrow -->
+        <line x1="592" y1="205" x2="618" y2="205" class="ln" marker-end="url(#ar1)"/>
+        <text x="400" y="316" text-anchor="middle" class="small mut">Each cell is that server's latest configuration (the voters it believes in).</text>
+      </svg>
+    </div>
+    <figcaption>After step 4 the voters are {A, C, D} and A is gone, so C and D are two of three: a live majority. A majority of {A, C, D} needs both of them, so D can only win with C's vote. But C, still on {A, B, C}, has never heard of D.</figcaption>
+  </figure>
+
+  <figure>
+    <div class="fig">
+      <svg viewBox="0 0 780 300" role="img" aria-label="The stuck election: D asks C and is rejected because D is not in C's configuration; C asks B and is rejected because B's log is longer; A never answers. Neither D nor C can reach a majority.">
+        <defs>
+          <marker id="ar2" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="head"/></marker>
+          <marker id="ar2b" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="head-bad"/></marker>
+        </defs>
+        <!-- nodes -->
+        <rect x="30" y="110" width="150" height="74" rx="8" class="box-acc"/>
+        <text x="105" y="136" text-anchor="middle" font-weight="600">D, candidate</text>
+        <text x="105" y="155" text-anchor="middle" class="small">believes {A,C,D}</text>
+        <text x="105" y="172" text-anchor="middle" class="small">needs C's vote</text>
+
+        <rect x="330" y="110" width="150" height="74" rx="8" class="box"/>
+        <text x="405" y="136" text-anchor="middle" font-weight="600">C, also campaigns</text>
+        <text x="405" y="155" text-anchor="middle" class="small">believes {A,B,C}</text>
+        <text x="405" y="172" text-anchor="middle" class="small">needs A's or B's vote</text>
+
+        <rect x="610" y="30" width="140" height="58" rx="8" class="box" stroke-dasharray="5 4"/>
+        <text x="680" y="55" text-anchor="middle" font-weight="600" class="mut">A</text>
+        <text x="680" y="73" text-anchor="middle" class="small mut">lost for good</text>
+
+        <rect x="610" y="206" width="140" height="58" rx="8" class="box"/>
+        <text x="680" y="231" text-anchor="middle" font-weight="600">B</text>
+        <text x="680" y="249" text-anchor="middle" class="small">removed, longer log</text>
+
+        <!-- D -> C request -->
+        <line x1="182" y1="128" x2="326" y2="128" class="ln" marker-end="url(#ar2)"/>
+        <text x="254" y="120" text-anchor="middle" class="small">pre-vote for D?</text>
+        <!-- C -> D reject -->
+        <line x1="326" y1="166" x2="184" y2="166" class="l-bad" marker-end="url(#ar2b)"/>
+        <text x="254" y="186" text-anchor="middle" class="small t-bad">no: "node is not a voter"</text>
+        <text x="254" y="201" text-anchor="middle" class="small t-bad">(D isn't in {A,B,C})</text>
+        <!-- C -> A -->
+        <line x1="482" y1="124" x2="606" y2="66" class="ln dash" marker-end="url(#ar2)"/>
+        <text x="520" y="80" text-anchor="middle" class="small mut">no answer</text>
+        <!-- C -> B -->
+        <line x1="482" y1="160" x2="606" y2="222" class="ln" marker-end="url(#ar2)"/>
+        <text x="575" y="176" class="small">vote for C?</text>
+        <line x1="606" y1="246" x2="470" y2="186" class="l-bad" marker-end="url(#ar2b)"/>
+        <text x="480" y="262" class="small t-bad">no: "our last index is greater"</text>
+        <!-- D -> A -->
+        <path d="M105,108 C140,40 480,30 606,52" class="ln dash" marker-end="url(#ar2)"/>
+        <text x="300" y="40" text-anchor="middle" class="small mut">no answer</text>
+      </svg>
+    </div>
+    <figcaption>Nobody can win, and nothing will change that: C would only learn {A, C, D} from a leader, and there can't be a leader without C. On correct raft the cluster stays like this forever (the scripted simulation waits 10 seconds of simulated time after the faults end, a very long time on these timeouts).</figcaption>
+  </figure>
+
+  <div class="prose">
+    <p>Plain Raft would recover at once: C would check only that D's log is at least as up to date as its own (it is), grant the vote, and D would win and send C the newer configuration. The bug is the membership check, not the protocol.</p>
+
+    <h3>The fix</h3>
+    <p>Trust your configuration to judge a candidate only when your log isn't behind the candidate's. If the candidate's log is <em>ahead</em> of yours, it may know configuration changes you haven't seen, in which it is a voter, so skip the membership check and let Raft's ordinary rules decide.</p>
+  </div>
+
+  <figure>
+    <div class="fig">
+      <svg viewBox="0 0 780 360" role="img" aria-label="How a server handles a vote request, upstream versus with the fix. The fix adds one question before the membership check: is the candidate's log ahead of mine? If yes, the membership check is skipped and Raft's ordinary rules decide.">
+        <defs>
+          <marker id="ar3" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="head"/></marker>
+          <marker id="ar3a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="head-acc"/></marker>
+        </defs>
+        <text x="190" y="24" text-anchor="middle" font-weight="600">Upstream today</text>
+        <text x="580" y="24" text-anchor="middle" font-weight="600">With the fix</text>
+        <line x1="390" y1="40" x2="390" y2="345" class="grid"/>
+
+        <!-- LEFT -->
+        <rect x="90" y="44" width="200" height="40" rx="6" class="box"/>
+        <text x="190" y="69" text-anchor="middle">(pre-)vote request from X</text>
+        <line x1="190" y1="84" x2="190" y2="140" class="ln" marker-end="url(#ar3)"/>
+        <rect x="70" y="142" width="240" height="48" rx="6" class="box"/>
+        <text x="190" y="162" text-anchor="middle">X a voter in my latest</text>
+        <text x="190" y="180" text-anchor="middle">configuration?</text>
+        <line x1="70" y1="166" x2="40" y2="166" class="ln"/><line x1="40" y1="166" x2="40" y2="314" class="ln"/>
+        <line x1="40" y1="314" x2="66" y2="314" class="ln" marker-end="url(#ar3)"/>
+        <text x="48" y="240" class="small">no</text>
+        <rect x="68" y="296" width="110" height="36" rx="6" class="box-bad"/>
+        <text x="123" y="319" text-anchor="middle" class="t-bad">reject</text>
+        <line x1="190" y1="190" x2="190" y2="226" class="ln" marker-end="url(#ar3)"/>
+        <text x="198" y="212" class="small">yes</text>
+        <rect x="140" y="228" width="200" height="56" rx="6" class="box"/>
+        <text x="240" y="250" text-anchor="middle">Raft's rules: term, one vote</text>
+        <text x="240" y="268" text-anchor="middle">per term, log up to date</text>
+        <line x1="240" y1="284" x2="240" y2="306" class="ln" marker-end="url(#ar3)"/>
+        <text x="240" y="324" text-anchor="middle">grant or reject</text>
+
+        <!-- RIGHT -->
+        <rect x="480" y="44" width="200" height="40" rx="6" class="box"/>
+        <text x="580" y="69" text-anchor="middle">(pre-)vote request from X</text>
+        <line x1="580" y1="84" x2="580" y2="104" class="l-acc" marker-end="url(#ar3a)"/>
+        <rect x="470" y="106" width="220" height="40" rx="6" class="box-acc"/>
+        <text x="580" y="131" text-anchor="middle" class="t-acc" font-weight="500">X's log ahead of mine?</text>
+        <line x1="580" y1="146" x2="580" y2="166" class="ln" marker-end="url(#ar3)"/>
+        <text x="588" y="160" class="small">no</text>
+        <rect x="460" y="168" width="240" height="48" rx="6" class="box"/>
+        <text x="580" y="188" text-anchor="middle">X a voter in my latest</text>
+        <text x="580" y="206" text-anchor="middle">configuration?</text>
+        <line x1="460" y1="192" x2="430" y2="192" class="ln"/><line x1="430" y1="192" x2="430" y2="314" class="ln"/>
+        <line x1="430" y1="314" x2="456" y2="314" class="ln" marker-end="url(#ar3)"/>
+        <text x="438" y="260" class="small">no</text>
+        <rect x="458" y="296" width="100" height="36" rx="6" class="box-bad"/>
+        <text x="508" y="319" text-anchor="middle" class="t-bad">reject</text>
+        <line x1="580" y1="216" x2="580" y2="236" class="ln" marker-end="url(#ar3)"/>
+        <text x="588" y="231" class="small">yes</text>
+        <rect x="560" y="238" width="200" height="56" rx="6" class="box"/>
+        <text x="660" y="260" text-anchor="middle">Raft's rules: term, one vote</text>
+        <text x="660" y="278" text-anchor="middle">per term, log up to date</text>
+        <line x1="660" y1="294" x2="660" y2="306" class="ln" marker-end="url(#ar3)"/>
+        <text x="660" y="324" text-anchor="middle">grant or reject</text>
+        <!-- the new edge: yes -> skip -->
+        <path d="M690,126 L740,126 L740,236" class="l-acc" marker-end="url(#ar3a)"/>
+        <text x="700" y="118" class="small t-acc">yes: skip the check</text>
+      </svg>
+    </div>
+    <figcaption>The fix adds one question (blue) in front of the membership check. In the stall, D's log is ahead of C's, so C skips the check, the election restriction lets C vote for D, and D wins.</figcaption>
+  </figure>
+
+  <div class="prose">
+    <h3>Why the fix is safe, and why it keeps #524's protection</h3>
+    <ul>
+      <li><strong>Safety.</strong> The fixed rule only ever grants votes that plain Raft would also grant: it still runs Raft's own checks, and only sometimes skips the extra one. Raft is safe without the membership check, so it is safe with it applied less often.</li>
+      <li><strong>When the logs are equal</strong>, the check is still applied, and it is accurate there. Two logs with the same last term and index are identical (Raft's Log Matching property), so the two servers hold the same configuration.</li>
+      <li><strong>The #524 case</strong> is a server that missed its own removal or demotion. Its log is behind the cluster's (it never received those entries), so the check still applies and it is still rejected.</li>
+      <li><strong>Caveat.</strong> That last point is an argument, not a measurement. The simulation's membership sweep also passes with the checks removed entirely, so it doesn't exercise #524's disruption. A scenario for it (a removed server campaigning) is planned.</li>
+    </ul>
+    <p>The code change is small: a helper and one extra condition on each of the four checks (two in <code>requestVote</code>, two in <code>requestPreVote</code>).</p>
+    <pre><code>func (r *Raft) candidateLogIsAhead(lastLogTerm, lastLogIndex uint64) bool {
+	lastIdx, lastTerm := r.getLastEntry()
+	return lastLogTerm > lastTerm || (lastLogTerm == lastTerm &amp;&amp; lastLogIndex > lastIdx)
+}
+
+if len(r.configurations.latest.Servers) > 0 &amp;&amp; !hasVote(r.configurations.latest, candidateID) &amp;&amp;
+	!r.candidateLogIsAhead(req.LastLogTerm, req.LastLogIndex) {
+	r.logger.Warn("rejecting pre-vote request since node is not a voter", "from", candidate)
+	return
+}</code></pre>
+
+    <h3>How the simulation found it, pinned it down, and checked the fix</h3>
+    <ol>
+      <li><strong>Found.</strong> The membership sweep (1 to 7 voters, an operator adding, promoting, demoting and removing servers, servers lost for good, crashes, partitions) failed its check that "the cluster recovers": no leader 5 seconds after the faults ended, with a majority alive. I named the wrong cause twice, before raft's own log showed C's rejection on the pre-vote path.</li>
+      <li><strong>Pinned down.</strong> A scripted test (<code>TestDSTStaleConfigStall</code>) plays the exact sequence with seeded timing. On correct raft, 15 of 20 seeds stay leaderless forever. With only the membership checks switched off, 20 of 20 recover. That isolates the cause. The other 5 seeds recover on correct raft too, and I haven't analyzed why.</li>
+      <li><strong>Seen again, unscripted.</strong> The sweep with gray failure (slow and lossy links) hit it with no planned partition: a voter lagging behind lossy links kept a configuration without the candidate and rejected it after the leader was lost (seed 175).</li>
+      <li><strong>Fix checked.</strong> With the fix switched on: the scripted sequence recovers on 20 of 20 seeds, the membership sweep passes 200 of 200, and the gray membership sweep (with bug 2's fix too) passes 200 of 200. Every seed replays exactly, so any failure can be rerun with raft's own log.</li>
+    </ol>
+
+    <h3>Ready to submit</h3>
+    <p>Branch <a href="https://github.com/prince776/raft/tree/fix/stale-config-vote"><code>fix/stale-config-vote</code></a> on your fork is based on upstream <code>main</code> (<code>dd4346d</code>) and uses nothing from the simulation. It adds two tests in raft's own style:</p>
+    <div class="tablewrap"><table>
+      <tr><th>Test</th><th>What it does</th><th>Before the fix</th><th>After</th></tr>
+      <tr><td><code>TestRaft_StaleVoterCanElectNewerVoter</code></td><td>The whole sequence on <code>MakeCluster</code> with in-memory transports, with and without pre-vote</td><td class="num">fails 3 of 3 runs, both modes</td><td class="num">passes 20 of 20, race detector clean</td></tr>
+      <tr><td><code>TestRaft_VoteGranted_When­CandidateLogAhead­OfStaleConfiguration</code></td><td>Sends vote and pre-vote requests straight to a server, from a candidate outside its configuration: same log, behind, ahead by index, ahead by term</td><td class="num">rejects the "ahead" cases</td><td class="num">grants only those</td></tr>
+    </table></div>
+    <p>Upstream's whole suite passes with the change (128s). The issue text is drafted in <a href="https://github.com/prince776/raft/blob/dst/UPSTREAM-ISSUE-DRAFT.md"><code>UPSTREAM-ISSUE-DRAFT.md</code></a>. Possibly related: <a href="https://github.com/hashicorp/raft/issues/472">#472</a>, a 3-node cluster stuck in Candidate, open since 2021.</p>
+  </div>
+</section>
+
+<!-- ===================================================== BUG 2 -->
+<section class="bug" id="bootstrap">
+  <div class="prose">
+    <h2>2. A crash inside bootstrap strands a new server</h2>
+    <div class="meta"><span class="pill bad">Liveness, low severity</span><span class="pill">One write's window, once per server</span><span class="pill acc">Branch <code>fix/bootstrap-crash</code></span></div>
+
+    <h3>Background</h3>
+    <p>A brand-new cluster has no leader to add members, so the first servers are <em>bootstrapped</em>: <code>BootstrapCluster</code> writes the initial configuration into the server's own log as entry 1 (term 1), and sets the stored current term to 1. Applications run the same thing at every start: "if <code>HasExistingState</code> says this server has no state, bootstrap it; then start raft".</p>
+    <p><code>HasExistingState</code> says yes if the stored term isn't 0, or the log isn't empty, or a snapshot exists. The term counts on purpose. A server that has a term has taken part in some cluster, even with an empty log (a new member that voted before receiving entries), and bootstrapping it again could split it off into a second cluster.</p>
+
+    <h3>The bug</h3>
+    <p><code>BootstrapCluster</code> writes the term first and the log entry second. These are two separate writes to the store, and a crash can fall between them:</p>
+  </div>
+
+  <figure>
+    <div class="fig">
+      <svg viewBox="0 0 780 250" role="img" aria-label="Before the fix, a crash after the term is written leaves term 1 and an empty log; on restart HasExistingState says yes, bootstrap is skipped, and the server has no configuration so it never elects a leader. After the fix the log entry is written first; a crash leaves the configuration in the log and the server starts and elects itself.">
+        <defs>
+          <marker id="ar4" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="head"/></marker>
+        </defs>
+        <g text-anchor="middle" class="small mut">
+          <text x="175" y="22">first write</text><text x="350" y="22">✕ crash: what's on disk</text><text x="525" y="22">restart</text><text x="690" y="22">outcome</text>
+        </g>
+        <text x="16" y="78" font-weight="600">Before</text>
+        <text x="16" y="186" font-weight="600" class="t-acc">After</text>
+        <!-- BEFORE row -->
+        <rect x="100" y="52" width="150" height="44" rx="6" class="box"/>
+        <text x="175" y="79" text-anchor="middle" class="mono">term = 1</text>
+        <line x1="250" y1="74" x2="272" y2="74" class="ln" marker-end="url(#ar4)"/>
+        <rect x="274" y="44" width="152" height="60" rx="6" class="box"/>
+        <text x="350" y="68" text-anchor="middle" class="mono">term: 1</text>
+        <text x="350" y="88" text-anchor="middle" class="mono">log: empty</text>
+        <line x1="426" y1="74" x2="448" y2="74" class="ln" marker-end="url(#ar4)"/>
+        <rect x="450" y="44" width="150" height="60" rx="6" class="box"/>
+        <text x="525" y="68" text-anchor="middle" class="small">has state? yes (term)</text>
+        <text x="525" y="88" text-anchor="middle" class="small">so skip bootstrap</text>
+        <line x1="600" y1="74" x2="622" y2="74" class="ln" marker-end="url(#ar4)"/>
+        <rect x="624" y="44" width="140" height="60" rx="6" class="box-bad"/>
+        <text x="694" y="68" text-anchor="middle" class="small t-bad">no configuration:</text>
+        <text x="694" y="88" text-anchor="middle" class="small t-bad">never campaigns</text>
+        <!-- AFTER row -->
+        <rect x="100" y="160" width="150" height="44" rx="6" class="box-acc"/>
+        <text x="175" y="187" text-anchor="middle" class="mono t-acc">log[1] = config</text>
+        <line x1="250" y1="182" x2="272" y2="182" class="ln" marker-end="url(#ar4)"/>
+        <rect x="274" y="152" width="152" height="60" rx="6" class="box"/>
+        <text x="350" y="176" text-anchor="middle" class="mono">term: 0</text>
+        <text x="350" y="196" text-anchor="middle" class="mono">log: config</text>
+        <line x1="426" y1="182" x2="448" y2="182" class="ln" marker-end="url(#ar4)"/>
+        <rect x="450" y="152" width="150" height="60" rx="6" class="box"/>
+        <text x="525" y="176" text-anchor="middle" class="small">has state? yes (log)</text>
+        <text x="525" y="196" text-anchor="middle" class="small">starts with its config</text>
+        <line x1="600" y1="182" x2="622" y2="182" class="ln" marker-end="url(#ar4)"/>
+        <rect x="624" y="152" width="140" height="60" rx="6" class="box-good"/>
+        <text x="694" y="176" text-anchor="middle" class="small t-good">elects itself,</text>
+        <text x="694" y="196" text-anchor="middle" class="small t-good">works normally</text>
+        <text x="390" y="238" text-anchor="middle" class="small mut">A crash before the first write leaves nothing, and the restart bootstraps from scratch, in both orders.</text>
+      </svg>
+    </div>
+    <figcaption>Only the order of the two writes changes. Before, the one dangerous crash point leaves a server that counts as set up but knows no voters, itself included. After, the same crash leaves a log holding the configuration, which is all a server needs.</figcaption>
+  </figure>
+
+  <div class="prose">
+    <p>A server stranded this way is a follower with an empty configuration. It never campaigns, because it isn't a voter in any configuration it knows. Bootstrapping it again fails with <code>ErrCantBootstrap</code>. In a bigger cluster this heals itself: the other servers elect a leader, whose replication gives the stranded one its log and configuration. It's permanent only where that server is needed for a majority, above all a one-server cluster, where nothing can ever be written again until someone deletes its data by hand. The window is a single write, once in a server's life, hence low severity.</p>
+    <p>After the fix the term is briefly 0 while the log holds an entry of term 1. That is harmless: the server's first election raises its term to 1, and the simulation's seed recovers exactly this way.</p>
+    <p>It's the same class of bug as Antithesis's <a href="https://github.com/hashicorp/raft/issues/746">#746</a>: two related values saved as two separate writes, with a crash between them leaving a combination that the code then trusts.</p>
+
+    <h3>How the simulation found it</h3>
+    <ol>
+      <li><strong>Found.</strong> The membership sweep under gray failure failed "the cluster recovers" on seed 54. That seed drew a single-voter cluster, and its one voter had a slow disk (fsync 38× slower), which stretched the gap between the two writes. A machine crash landed in it 28ms after start. The state dump showed the voter at term 1 with an empty log and no configuration, and the spares at term 0.</li>
+      <li><strong>Confirmed.</strong> With the writes swapped (a switch in the simulation build), the same seed recovers. <code>TestBootstrapCrash</code> then reproduces it directly, with no timing involved: a store whose log write fails after the term was saved, holding exactly what such a crash leaves.</li>
+    </ol>
+
+    <h3>Ready to submit</h3>
+    <p>Branch <a href="https://github.com/prince776/raft/tree/fix/bootstrap-crash"><code>fix/bootstrap-crash</code></a> on your fork, based on upstream <code>main</code>, swaps the two writes and adds <code>TestBootstrapCluster_CrashBetweenWrites</code>. It crashes at each point (a store whose write fails), restarts the way applications do (bootstrap unless there's existing state), and requires the server to become leader and apply a command.</p>
+    <div class="tablewrap"><table>
+      <tr><th>Crash point</th><th>Before the fix</th><th>After</th></tr>
+      <tr><td>Before the configuration entry (upstream: after the term)</td><td class="num">fails: follower, empty configuration</td><td class="num">passes</td></tr>
+      <tr><td>Before the term (with the fix: after the entry)</td><td class="num">passes</td><td class="num">passes</td></tr>
+    </table></div>
+    <p>Upstream's whole suite passes with the change, and the race detector is clean. Not yet in the issue draft; it can go with bug 1 or as its own issue.</p>
+  </div>
+</section>
+
+<!-- ===================================================== BUG 3 -->
+<section class="bug" id="demoted-leader">
+  <div class="prose">
+    <h2>3. A demoted leader shuts down</h2>
+    <div class="meta"><span class="pill">Behaviour, not safety</span><span class="pill">Possibly intended: a question for upstream</span></div>
+
+    <h3>What happens</h3>
+    <p>Membership has two ways to take a server's vote away: <code>RemoveServer</code> takes the server out of the cluster, and <code>DemoteVoter</code> keeps it in as a non-voter (it keeps receiving the log, but doesn't vote or count towards a majority). When the server being demoted is the leader, raft treats the two the same. Once the configuration that takes its vote is committed, the leader steps down, and with <code>ShutdownOnRemove</code> (on by default) it shuts its raft down entirely:</p>
+    <pre><code>// leaderLoop, when a new configuration commits
+if !hasVote(r.configurations.committed, r.localID) {
+	stepDown = true
+}
+...
+if stepDown {
+	if r.config().ShutdownOnRemove {
+		r.logger.Info("removed ourself, shutting down")
+		r.Shutdown()</code></pre>
+    <p><code>hasVote</code> is false for a removed server and for a demoted one alike. The configuration still lists the old leader as a non-voter, but it no longer runs. A demoted <em>follower</em> keeps running as a non-voter, as you'd expect.</p>
+
+    <h3>Why it might matter</h3>
+    <ul>
+      <li>The option's own documentation speaks only of removal: "If we are a member of a cluster, and RemovePeer is invoked for the local node … If ShutdownOnRemove is set, we additional shutdown Raft." Demotion isn't mentioned.</li>
+      <li>An operator who demotes the current leader expects a non-voter that keeps up with the log, and gets a dead process instead. The cluster lists it as a member, but it never catches up. Promoting it again later adds a voter that never answers, which can cost the cluster its majority. That is how the simulation's operator stalled clusters.</li>
+      <li>It isn't a safety problem: the rest of the cluster carries on correctly.</li>
+    </ul>
+
+    <h3>How it came up</h3>
+    <p>The simulation's membership operator demoted leaders, and sometimes later tried to promote them again. Those clusters stalled, and the trail led here: raft's log showed <code>removed ourself, shutting down</code> on a server that was meant to stay a non-voter. The operator now skips servers whose raft has shut down. The behaviour is noted in the issue draft as a question, since it may be deliberate.</p>
+  </div>
+</section>
+
+<p class="foot">Full results, including every sweep and the bug benchmark, are in <a href="https://github.com/prince776/raft/blob/dst/DST.md">DST.md</a> on the fork's <code>dst</code> branch. The simulation is <a href="https://github.com/prince776/go-dst-kit">go-dst-kit</a>.</p>
+</div>

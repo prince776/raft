@@ -60,14 +60,17 @@ process, raft's real NetworkTransport over a simulated network, seeded
 faults): <https://github.com/prince776/raft/tree/dst>, test
 `TestDSTStaleConfigStall` in `dst_bugs_test.go`. On 20 seeds, correct raft
 stays leaderless on 15; with the candidate checks off, all 20 elect a
-leader. Each seed replays exactly. We can also write a reproduction with
-raft's own test helpers (`MakeCluster`, partitions via `InmemTransport`
-disconnects) if that's more useful.
+leader. Each seed replays exactly.
 
 It also happens without a scripted partition: in a randomized sweep with
 slow and lossy links, a voter that lagged behind kept a configuration
 without the candidate and rejected it (`rejecting pre-vote request since
 node is not in configuration`) after the leader was lost.
+
+A reproduction with raft's own test helpers, and the fix below, are on
+branch `fix/stale-config-vote` of <https://github.com/prince776/raft>
+(`TestRaft_StaleVoterCanElectNewerVoter` fails every run before the fix,
+with and without pre-vote).
 
 Base: `dd4346d` (main as of 2026-11).
 
@@ -107,8 +110,10 @@ bootstrapping again returns `ErrCantBootstrap`, and the node has no
 configuration, so it never campaigns; a single-node cluster needs its data
 wiped. Appending the configuration entry before saving the term closes
 the window (a crash between them leaves a log whose configuration raft
-uses on start). Low severity (one write, once per node); maybe a separate
-issue.
+uses on start). Low severity (one write, once per node; in a multi-node
+cluster a leader elected by the others repairs the node); maybe a separate
+issue. Fix and test: branch `fix/bootstrap-crash` on
+<https://github.com/prince776/raft>.
 
 **A demoted leader shuts down.**
 A leader that is demoted (`DemoteVoter`, not removed) steps down and, with
