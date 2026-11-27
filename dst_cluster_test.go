@@ -201,3 +201,9 @@ func dstCluster(h *dsttest.Harness, n int) []*dstNode { return dstClusterWith(h,
 func dstClusterWith(h *dsttest.Harness, n int, sc dstScenario) []*dstNode {
 	return newCluster(h, clusterSpec{voters: n, scenario: sc}).nodes
 }
+
+// covers reports whether the store's latest finished snapshot includes
+// index (for checks between scheduling steps: no lock).
+func (s *InmemSnapshotStore) covers(index uint64) bool {
+	return s != nil && s.hasSnapshot && s.latest != nil && s.latest.meta.Index >= index
+}

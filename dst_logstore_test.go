@@ -176,6 +176,19 @@ func (s *dstLogStore) write(op storeOp) error {
 	return nil
 }
 
+// durableAt reports what the store durably holds at index: the entry's
+// term if it has the entry, and whether the index is below its first
+// entry (compacted into a snapshot). For checks between scheduling steps
+// only: it takes no lock (a check can't use the World), and it relies on
+// write applying an operation only after its fsync, so the maps hold
+// exactly what a crash would keep.
+func (s *dstLogStore) durableAt(index uint64) (term uint64, has, compacted bool) {
+	if l, ok := s.logs[index]; ok {
+		return l.Term, true, false
+	}
+	return 0, false, s.first > index
+}
+
 func (s *dstLogStore) FirstIndex() (uint64, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()

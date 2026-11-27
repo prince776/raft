@@ -14,8 +14,8 @@ import (
 	"github.com/prince776/go-dst-kit/dst"
 )
 
-// checks registers the cluster's checks: always, election safety and
-// leaders being voters; at the end, that the cluster recovers, that the
+// checks registers the cluster's checks: always, election safety, leaders
+// being voters and the commit rule; at the end, that the cluster recovers, that the
 // clients' history is linearizable, that acknowledged writes survive on
 // the cluster's members, that every node applied a prefix of one sequence,
 // and, with the operator, that the members agree on the configuration and
@@ -54,6 +54,84 @@ func (c *simCluster) checks() {
 			elected[nd.name] = term
 			if !hasVote(nd.raft.configurations.latest, nd.id()) {
 				return fmt.Errorf("%s leads term %d but isn't a voter in its configuration %v", nd.name, term, nd.raft.configurations.latest.Servers)
+			}
+		}
+		return nil
+	})
+	// The commit rule, white-box: when a leader moves its commit index to
+	// i, a majority of the voters in its configuration durably store its
+	// entry i (same term), or a snapshot covering it. Raft's end-to-end
+	// guarantees rest on this rule, but breaking it shows only under faults
+	// outside raft's model (quorum-off-by-one, DST.md 6.4), so the other
+	// checks can't see it.
+	//
+	// "Its configuration" is the one the leader counted against, which the
+	// check can't see directly: the count, a configuration change and the
+	// commit index reaching the leader loop (through a channel, steps
+	// later) come in any order. So it accepts any configuration the leader
+	// held as its latest since its commit index last moved. A fixed cluster
+	// has only one. A leader appending a configuration change counts its
+	// own write of that entry before switching to the new configuration
+	// (dispatchLogs, then setConfiguration), so adding a second voter to a
+	// one-voter cluster commits at once, by the old configuration (DST.md
+	// 6.9). A node's commit index from before it leads (learned while
+	// following) is the previous leader's move, checked when it was made.
+	checkedCommit := map[string]uint64{} // leader -> commit index last checked
+	held := map[string][]Configuration{} // leader -> latest configurations since its last commit move
+	heldTerm := map[string]uint64{}
+	h.Always("a leader commits only what a majority stores", func() error {
+		for _, nd := range c.nodes {
+			if !nd.up() || nd.raft.getState() != Leader {
+				continue
+			}
+			latestNow := nd.raft.configurations.latest
+			if t := nd.raft.getCurrentTerm(); heldTerm[nd.name] != t {
+				// A new term as leader: its commit index so far came from
+				// following the previous leader (checked when that one moved
+				// it). Judge only the moves this leader makes.
+				heldTerm[nd.name], held[nd.name] = t, nil
+				checkedCommit[nd.name] = nd.raft.getCommitIndex()
+			}
+			if hs := held[nd.name]; len(hs) == 0 || !slices.Equal(hs[len(hs)-1].Servers, latestNow.Servers) {
+				held[nd.name] = append(hs, latestNow.Clone())
+			}
+			ci := nd.raft.getCommitIndex()
+			if ci == 0 || ci <= checkedCommit[nd.name] {
+				continue
+			}
+			checkedCommit[nd.name] = ci
+			candidates := held[nd.name]
+			held[nd.name] = []Configuration{latestNow.Clone()}
+			term, has, _ := nd.logs.durableAt(ci)
+			if !has {
+				continue // compacted on the leader already: checked when it moved there
+			}
+			majority := func(cfg Configuration) (bool, string) {
+				voters, stored := 0, 0
+				for _, srv := range cfg.Servers {
+					if srv.Suffrage != Voter {
+						continue
+					}
+					voters++
+					other := c.node(srv.ID)
+					if other == nil || other.logs == nil {
+						continue
+					}
+					t, ok, compacted := other.logs.durableAt(ci)
+					if (ok && t == term) || compacted || other.snaps.covers(ci) {
+						stored++
+					}
+				}
+				return stored > voters/2, fmt.Sprintf("%d of %d voters", stored, voters)
+			}
+			ok, counts := false, []string{}
+			for _, cfg := range candidates {
+				m, n := majority(cfg)
+				ok = ok || m
+				counts = append(counts, n)
+			}
+			if !ok {
+				return fmt.Errorf("%s committed index %d (term %d) stored by %s of its configuration(s) since its last commit", nd.name, ci, term, strings.Join(counts, ", "))
 			}
 		}
 		return nil
