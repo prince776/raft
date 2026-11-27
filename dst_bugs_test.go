@@ -297,8 +297,20 @@ func TestDSTMembershipGrayFixed(t *testing.T) {
 		func(h *dsttest.Harness) { membershipClusterWith(h, true, true) })
 }
 
+// TestDSTDiskErrorsFixed: TestDSTDiskErrors with snapshots retained drawn
+// (1 or 2) and the proposed fixes on: an unreadable newest snapshot no
+// longer makes raft panic at startup (6.12).
+//
+// Fails if: any seed fails with knownFixes on.
+func TestDSTDiskErrorsFixed(t *testing.T) {
+	activeBug = knownFixes
+	defer func() { activeBug = "" }()
+	dsttest.Run(t, dstOpts(dsttest.Faults{Crash: true, Disk: true, DiskErrors: true}),
+		func(h *dsttest.Harness) { sweepCluster(h, 5) })
+}
+
 // knownFixes are the proposed fixes for the raft bugs found so far.
-const knownFixes = "candidate-check-unless-ahead,bootstrap-log-first,snapshot-boundary-fix"
+const knownFixes = "candidate-check-unless-ahead,bootstrap-log-first,snapshot-boundary-fix,snapshot-fallback-needs-log"
 
 // TestDSTMembershipFixed: the membership sweep with servers lost for good
 // and replaced, with the proposed fixes on. Correct raft stalls on some

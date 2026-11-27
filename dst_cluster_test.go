@@ -15,6 +15,8 @@ package raft
 import (
 	"fmt"
 	"os"
+	"strings"
+	"syscall"
 	"time"
 
 	"github.com/hashicorp/go-hclog"
@@ -38,6 +40,9 @@ type clusterSpec struct {
 	// drawConfig draws raft's configuration per seed (raftKnobs), the
 	// same on every node; otherwise it is dstConfig's, fixed.
 	drawConfig bool
+	// oneSnapshot keeps one snapshot (FileSnapshotStore's retain), so a
+	// node never falls back to an older one at startup (DST.md 6.12).
+	oneSnapshot bool
 	// clients is the number of clients on their own machines, reaching
 	// the cluster through each node's server (dst_service_test.go).
 	clients int
@@ -216,6 +221,10 @@ func newCluster(h *dsttest.Harness, spec clusterSpec) *simCluster {
 	if spec.clients > 0 {
 		h.Expect("a remote client's operation succeeded", "a remote client followed a redirect", "a remote client retried")
 	}
+	// raft panics when it can't persist its term or vote (fail-stop): with
+	// disk errors that is the process dying, restarted by its supervisor.
+	// Only disk-error panics: any other panic is still a failure.
+	h.OnPanic(func(v any) bool { return diskError(fmt.Errorf("%v", v)) })
 	c.checks()
 	return c
 }
@@ -237,9 +246,24 @@ func (c *simCluster) boot(nd *dstNode, w *dst.World, initial []Server) {
 		}
 		h.Sometimes("a node lost its disk")
 	}
-	logs, err := openDSTLogStore(w.FS(), "raft.log")
-	if err != nil {
-		h.Fail(err)
+	// Startup steps that hit the disk retry on a disk error (Faults.
+	// DiskErrors: a full disk or EIO passes), as a supervised service does.
+	retry := func(what string, fn func() error) bool {
+		for {
+			err := fn()
+			if err == nil {
+				return true
+			}
+			if !diskError(err) {
+				h.Fail(fmt.Errorf("%s: %v", what, err))
+				return false
+			}
+			h.Sometimes("a node's startup failed on the disk")
+			w.Sleep(50 * time.Millisecond)
+		}
+	}
+	var logs *dstLogStore
+	if !retry("open the log store", func() (err error) { logs, err = openDSTLogStore(w.FS(), "raft.log"); return err }) {
 		return
 	}
 	logs.noSync, logs.splitBatches = c.spec.scenario.noSync, c.spec.scenario.splitBatches
@@ -268,25 +292,37 @@ func (c *simCluster) boot(nd *dstNode, w *dst.World, initial []Server) {
 	trans := NewNetworkTransportWithConfig(&NetworkTransportConfig{Stream: stream, MaxPool: 3, Timeout: transTimeout,
 		Logger: hclog.NewNullLogger(), World: w})
 	retain := 1
-	if c.knobs != nil {
+	if c.knobs != nil && !c.spec.oneSnapshot {
 		retain = c.knobs.retain
 	}
-	if nd.snaps, err = openDSTSnapshots(w, retain, conf.Logger); err != nil {
-		h.Fail(err)
+	if !retry("open the snapshot store", func() (err error) { nd.snaps, err = openDSTSnapshots(w, retain, conf.Logger); return err }) {
 		return
 	}
 	if nd.initial {
-		if ok, _ := HasExistingState(nd.logs, nd.logs, nd.snaps); !ok {
-			if err := BootstrapCluster(conf, nd.logs, nd.logs, nd.snaps, trans, Configuration{Servers: initial}); err != nil {
-				h.Fail(err)
-				return
+		bootstrap := func() error {
+			if ok, _ := HasExistingState(nd.logs, nd.logs, nd.snaps); ok {
+				return nil
 			}
+			return BootstrapCluster(conf, nd.logs, nd.logs, nd.snaps, trans, Configuration{Servers: initial})
+		}
+		if !retry("bootstrap", bootstrap) {
+			return
 		}
 	}
 	nd.fsm = newKVFSM(h)
-	r, err := NewRaft(conf, nd.fsm, nd.logs, nd.logs, nd.snaps, trans)
-	if err != nil {
-		h.Fail(err)
+	// Restoring a snapshot can fail on a read error; raft then reports
+	// "failed to load any existing snapshots" without the cause, so that
+	// message retries too (a snapshot that is really corrupt never loads,
+	// and the run fails its liveness checks instead).
+	var r *Raft
+	if !retry("start raft", func() (err error) {
+		r, err = NewRaft(conf, nd.fsm, nd.logs, nd.logs, nd.snaps, trans)
+		if err != nil && (strings.Contains(err.Error(), "failed to load any existing snapshots") ||
+			strings.Contains(err.Error(), "a later snapshot couldn't be read")) && c.h.Swarm().ReadErrProb > 0 {
+			return fmt.Errorf("%w (%v)", syscall.EIO, err)
+		}
+		return err
+	}) {
 		return
 	}
 	nd.raft = r

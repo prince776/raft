@@ -455,3 +455,27 @@ edit('raft.go', in_func('func (r *Raft) processLogs(', '''			batch = append(batc
 			}
 
 			// If we have filled up a batch, send it to the FSM'''))
+
+# Experimental fix (DST.md 6.12): restoreSnapshot falls back to an older
+# snapshot when the newest fails to restore, but NewRaft then replays the
+# log from the older snapshot's index and panics where the log was
+# compacted past it. An older snapshot is usable only if the log holds
+# every entry after it.
+edit('api.go', in_func('func (r *Raft) restoreSnapshot() error {', '''	for _, snapshot := range snapshots {
+		if success := r.tryRestoreSingleSnapshot(snapshot); !success {''', '''	for _, snapshot := range snapshots {
+		if bug("snapshot-fallback-needs-log") && !r.logFollows(snapshot.Index) {
+			r.logger.Error("not restoring a snapshot the log was compacted past", "id", snapshot.ID, "last-index", snapshot.Index)
+			continue
+		}
+		if success := r.tryRestoreSingleSnapshot(snapshot); !success {'''))
+# ...and, the general guard, wherever the snapshot went missing (a
+# fallback above, or FileSnapshotStore's List skipping a snapshot whose
+# metadata it couldn't read): NewRaft returns an error instead of
+# replaying a log that doesn't follow the restored snapshot.
+edit('api.go', lambda s: s.replace('''	// Scan through the log for any configuration change entries.
+	snapshotIndex, _ := r.getLastSnapshot()''', '''	// Scan through the log for any configuration change entries.
+	snapshotIndex, _ := r.getLastSnapshot()
+	if bug("snapshot-fallback-needs-log") && !r.logFollows(snapshotIndex) {
+		first, _ := r.logs.FirstIndex()
+		return nil, fmt.Errorf("the log starts at %d, past the restored snapshot's index %d: a later snapshot couldn't be read", first, snapshotIndex)
+	}''', 1))

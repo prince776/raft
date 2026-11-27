@@ -1,4 +1,4 @@
-<title>Three hashicorp/raft Bugs</title>
+<title>Four hashicorp/raft Bugs</title>
 <meta name="claude:viewport-fit-sides" content="cover">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;600&family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap">
@@ -98,14 +98,15 @@ td.num { font-variant-numeric: tabular-nums; white-space: nowrap; }
 
 <div class="wrap">
 <header class="prose">
-  <h1>Three hashicorp/raft Bugs</h1>
+  <h1>Four hashicorp/raft Bugs</h1>
   <p class="lede">What deterministic simulation testing found in hashicorp/raft, explained for someone who knows Raft from the paper but not this library: what goes wrong, why the code is the way it is, how the fix works, and how the simulation found, reproduced and checked each one.</p>
 </header>
 
-<nav class="toc" aria-label="The three bugs">
+<nav class="toc" aria-label="The four bugs">
   <a href="#stale-config"><div class="k">Bug 1 · liveness</div><div class="t">A majority that can never elect</div><div class="s">A lagging voter rejects the only candidate that could win. Fix and tests ready.</div></a>
   <a href="#bootstrap"><div class="k">Bug 2 · liveness, low severity</div><div class="t">A crash inside bootstrap</div><div class="s">Two writes in the wrong order strand a new server. Fix and tests ready.</div></a>
   <a href="#demoted-leader"><div class="k">Bug 3 · behaviour</div><div class="t">A demoted leader shuts down</div><div class="s">Demotion is treated as removal. A question for upstream.</div></a>
+  <a href="#snapshot-boundary"><div class="k">Bug 4 · liveness, then a crash</div><div class="t">A follower trips over its own snapshot</div><div class="s">Rejects appends it already has, rolls its state back, loops, panics. Fix and tests ready.</div></a>
 </nav>
 
 <!-- ===================================================== BUG 1 -->
@@ -450,6 +451,99 @@ if stepDown {
 
     <h3>How it came up</h3>
     <p>The simulation's membership operator demoted leaders, and sometimes later tried to promote them again. Those clusters stalled, and the trail led here: raft's log showed <code>removed ourself, shutting down</code> on a server that was meant to stay a non-voter. The operator now skips servers whose raft has shut down. The behaviour is noted in the issue draft as a question, since it may be deliberate.</p>
+  </div>
+</section>
+
+<!-- ===================================================== BUG 4 -->
+<section class="bug" id="snapshot-boundary">
+  <div class="prose">
+    <h2>4. A follower trips over its own snapshot</h2>
+    <div class="meta"><span class="pill bad">Liveness, then a panic; state rolled back</span><span class="pill">Overlaps Antithesis <a href="https://github.com/hashicorp/raft/issues/697">#697</a></span><span class="pill acc">Branch <code>fix/snapshot-boundary</code></span></div>
+
+    <div class="aside">
+      <h4>The Raft you need for this</h4>
+      <ul>
+        <li><strong>The consistency check.</strong> Each AppendEntries names the entry just before the new ones (index and term). The follower accepts only if its log has that entry with that term; otherwise it rejects, and the leader retries from further back.</li>
+        <li><strong>Snapshots.</strong> A server saves its state machine at some index and deletes the log entries the snapshot covers. Everything in a snapshot is committed, and every leader holds every committed entry, so those entries can never conflict with a leader's.</li>
+        <li><strong>InstallSnapshot</strong> (paper Figure 13). A leader that no longer has the entries a follower needs sends its snapshot instead. Rule 6: if the follower already has the snapshot's last entry, it keeps its log after it and doesn't reset its state.</li>
+        <li><strong>TrailingLogs</strong> (hashicorp's option) keeps some entries behind after a snapshot, so slightly lagging followers can still be caught up from the log. It may be set to 0.</li>
+      </ul>
+    </div>
+
+    <h3>The bug</h3>
+    <p>hashicorp/raft's check looks the previous entry up in the log unless it is the follower's last entry: the end of its log, or of its snapshot when the log is empty. With few or no trailing entries, a follower can hold a snapshot up to 207 and a log of just 208. The leader's next append, whose previous entry is 207, then fails the lookup, though the follower's own snapshot proves 207 committed. From there it gets worse:</p>
+  </div>
+
+  <figure>
+    <div class="fig">
+      <svg viewBox="0 0 780 330" role="img" aria-label="Follower n0 has a snapshot covering entries up to 207 and only entry 208 in its log. The leader's append whose previous entry is 207 is rejected because 207 is not in the log. The leader then sends its own older snapshot up to 204; the follower installs it, its applied state goes back to 204, entries 205 to 207 exist nowhere on it, and it loops until applying 205 panics.">
+        <defs>
+          <marker id="ar5" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="head"/></marker>
+        </defs>
+        <text x="16" y="44" class="small mut">log index</text>
+        <text x="151" y="44" text-anchor="middle" class="small mut mono">200</text>
+        <text x="213" y="44" text-anchor="middle" class="small mut mono">201</text>
+        <text x="275" y="44" text-anchor="middle" class="small mut mono">202</text>
+        <text x="337" y="44" text-anchor="middle" class="small mut mono">203</text>
+        <text x="399" y="44" text-anchor="middle" class="small mut mono">204</text>
+        <text x="461" y="44" text-anchor="middle" class="small mut mono">205</text>
+        <text x="523" y="44" text-anchor="middle" class="small mut mono">206</text>
+        <text x="585" y="44" text-anchor="middle" class="small mut mono">207</text>
+        <text x="647" y="44" text-anchor="middle" class="small mut mono">208</text>
+        <text x="709" y="44" text-anchor="middle" class="small mut mono">209</text>
+        <!-- row 1: the follower after its own snapshot -->
+        <text x="16" y="82" font-weight="600">n0 before</text>
+        <rect x="120" y="58" width="496" height="40" rx="6" class="box-acc"/>
+        <text x="368" y="83" text-anchor="middle" class="small t-acc">its own snapshot: entries up to 207, all committed</text>
+        <rect x="618" y="58" width="58" height="40" rx="6" class="box"/>
+        <text x="647" y="83" text-anchor="middle" class="mono">208</text>
+        <!-- row 2: the leader's append -->
+        <text x="16" y="146" font-weight="600">leader sends</text>
+        <text x="368" y="140" class="small">AppendEntries, previous entry 207</text>
+        <line x1="585" y1="128" x2="585" y2="102" class="ln" marker-end="url(#ar5)"/>
+        <text x="368" y="160" class="small t-bad">✕ 207 isn't in the log → rejected; leader backs off</text>
+        <!-- row 3: after the older snapshot -->
+        <text x="16" y="212" font-weight="600">n0 after</text>
+        <rect x="120" y="188" width="310" height="40" rx="6" class="box"/>
+        <text x="275" y="213" text-anchor="middle" class="small">leader's older snapshot: up to 204</text>
+        <rect x="432" y="188" width="182" height="40" rx="6" class="box-bad"/>
+        <text x="523" y="213" text-anchor="middle" class="small t-bad">205–207: nowhere</text>
+        <rect x="618" y="188" width="58" height="40" rx="6" class="box"/>
+        <text x="647" y="213" text-anchor="middle" class="mono">208</text>
+        <text x="120" y="252" class="small t-bad">applied index goes back 207 → 204, and the state machine with it</text>
+        <text x="120" y="276" class="small">every append after 204 fails the same way; the snapshot is sent again and again (#697)</text>
+        <text x="120" y="300" class="small t-bad">when the commit index passes 204, applying 205 finds no entry: panic, "log not found"</text>
+      </svg>
+    </div>
+    <figcaption>With <code>TrailingLogs</code> 0 a snapshot deletes every entry it covers, so the follower's log holds only what came after it. The previous-entry check looks only in the log, and the follower ends up doubting entries its own snapshot proves committed.</figcaption>
+  </figure>
+
+  <div class="prose">
+    <p>The leader, finding the follower "behind", sends its own snapshot, which is older than the follower's state. The follower installs it without asking whether it already has those entries, so its applied index and its state machine move back in time. That alone breaks the guarantee that a state machine only moves forward, whatever <code>TrailingLogs</code> is: any follower handed an older snapshot rolls back. The entries between the two snapshots now exist nowhere on the follower, so it rejects every append after them, the leader resends the snapshot, and the pair loops. That is the livelock Antithesis reported as <a href="https://github.com/hashicorp/raft/issues/697">#697</a>, reached another way. Once the commit index passes the older snapshot, the follower tries to apply an entry it doesn't have and raft panics.</p>
+    <p>Upstream's attempted fix for #697 (<a href="https://github.com/hashicorp/raft/pull/704">PR #704</a>, closed unmerged) handles a conflicting entry at the snapshot's index, not either of these.</p>
+
+    <h3>The fix</h3>
+    <ol>
+      <li><strong>The boundary matches.</strong> If the previous entry is at or below the follower's snapshot, it matches: it's committed, and the leader has it. Incoming entries at or below the snapshot are skipped, not compared.</li>
+      <li><strong>Rule 6.</strong> A follower that already holds a snapshot's last entry, in its log with the same term or under its own snapshot, acknowledges the snapshot without installing it.</li>
+    </ol>
+    <p>My first version of the second part acknowledged any snapshot ending at or before the follower's applied index. The membership sweep under gray failure found that it could livelock too: a follower whose applied index had run ahead of both its log and its snapshot acknowledged every snapshot, yet couldn't continue from any of them. Following the paper's rule exactly fixed it.</p>
+
+    <h3>How the simulation found it</h3>
+    <ol>
+      <li><strong>Found.</strong> Once each seed drew raft's configuration (timeouts, batch sizes, trailing logs, snapshot threshold), seed 11 of the everything sweep (crashes, disk faults, partitions, network faults) drew <code>TrailingLogs</code> 0 and panicked with <code>log not found</code>. raft's log showed the sequence above step by step.</li>
+      <li><strong>Measured.</strong> A sweep forcing <code>TrailingLogs</code> 0 failed 2 of 400 seeds on correct raft and none with the fix. Since snapshots moved onto the simulated disk the timing no longer reaches it, so two scripted tests now show it on every run.</li>
+      <li><strong>Checked.</strong> The membership sweep under gray failure, with every proposed fix on, passes 400 of 400 seeds; that is the sweep that caught the first version of the fix.</li>
+    </ol>
+
+    <h3>Ready to submit</h3>
+    <p>Branch <a href="https://github.com/prince776/raft/tree/fix/snapshot-boundary"><code>fix/snapshot-boundary</code></a>, based on upstream <code>main</code>, has both parts and two tests written with raft's own helpers:</p>
+    <div class="tablewrap"><table>
+      <tr><th>Test</th><th>Upstream</th><th>With the fix</th></tr>
+      <tr><td><code>TestRaft_AppendEntries_PrevLogAtSnapshotBoundary</code>: an append whose previous entry is the follower's snapshot index, or inside the snapshot with entries crossing it</td><td class="num">fails every run</td><td class="num">passes</td></tr>
+      <tr><td><code>TestRaft_InstallSnapshot_IgnoresSnapshotOlderThanApplied</code>: an older snapshot sent to an up-to-date follower</td><td class="num">fails every run (state goes from 20 entries back to 10)</td><td class="num">passes</td></tr>
+    </table></div>
+    <p>Upstream's whole suite passes with the change. One upstream test, <code>TestRaft_ProtocolVersion_Upgrade_2_3</code>, is flaky with and without it (4 of 20 runs fail upstream, 2 of 20 with the fix).</p>
   </div>
 </section>
 

@@ -4,7 +4,10 @@ package raft
 
 import (
 	"fmt"
+	"os"
+	"path/filepath"
 	"testing"
+	"time"
 )
 
 // The snapshot boundary (DST.md 6.11), scripted with raft's own test
@@ -179,5 +182,91 @@ func TestSnapshotBoundaryScripted(t *testing.T) {
 				t.Errorf("with the fix: %v", p)
 			}
 		})
+	}
+}
+
+// TestSnapshotFallbackGap (DST.md 6.12): a node keeps two snapshots and,
+// with TrailingLogs 0, a log compacted past the older one. If the newest
+// can't be read at startup (an I/O error, or corruption), restoreSnapshot
+// falls back to the older one, and NewRaft then panics replaying the log
+// entries the newest snapshot had compacted away.
+//
+// Fails if: correct raft doesn't panic (nothing left to show), or with
+// snapshot-fallback-needs-log NewRaft panics instead of returning an error.
+func TestSnapshotFallbackGap(t *testing.T) {
+	defer func() { activeBug = "" }()
+	start := func(t *testing.T) (panicked any, err error) {
+		dir := t.TempDir()
+		conf := inmemConfig(t)
+		conf.TrailingLogs = 0
+		store := NewInmemStore()
+		snaps, serr := NewFileSnapshotStore(dir, 2, nil)
+		if serr != nil {
+			t.Fatal(serr)
+		}
+		addr, trans := NewInmemTransport("")
+		conf.LocalID = ServerID(addr)
+		if err := BootstrapCluster(conf, store, store, snaps, trans, Configuration{Servers: []Server{{ID: conf.LocalID, Address: addr}}}); err != nil {
+			t.Fatal(err)
+		}
+		r, err := NewRaft(conf, &MockFSM{}, store, store, snaps, trans)
+		if err != nil {
+			t.Fatal(err)
+		}
+		waitForLeader := func() {
+			for i := 0; i < 200 && r.State() != Leader; i++ {
+				time.Sleep(10 * time.Millisecond)
+			}
+		}
+		waitForLeader()
+		for round := 0; round < 2; round++ {
+			for i := 0; i < 10; i++ {
+				if err := r.Apply([]byte(fmt.Sprintf("r%d-%d", round, i)), time.Second).Error(); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err := r.Snapshot().Error(); err != nil {
+				t.Fatal(err)
+			}
+		}
+		// One entry after the newest snapshot: the log is just that.
+		if err := r.Apply([]byte("after"), time.Second).Error(); err != nil {
+			t.Fatal(err)
+		}
+		if err := r.Shutdown().Error(); err != nil {
+			t.Fatal(err)
+		}
+		list, _ := snaps.List()
+		if len(list) != 2 {
+			t.Fatalf("test setup: %d snapshots, want 2", len(list))
+		}
+		if first, _ := store.FirstIndex(); first <= list[1].Index+1 {
+			t.Fatalf("test setup: the log (first index %d) still follows the older snapshot %d", first, list[1].Index)
+		}
+		// The newest snapshot can't be read now.
+		if err := os.Remove(filepath.Join(dir, snapPath, list[0].ID, stateFilePath)); err != nil {
+			t.Fatal(err)
+		}
+		_, trans2 := NewInmemTransport(addr)
+		defer func() { panicked = recover() }()
+		r2, err := NewRaft(conf, &MockFSM{}, store, store, snaps, trans2)
+		if err == nil {
+			r2.Shutdown().Error()
+		}
+		return nil, err
+	}
+	activeBug = ""
+	if p, err := start(t); p == nil {
+		t.Errorf("correct raft didn't panic (err %v)", err)
+	} else {
+		t.Logf("correct raft panicked: %v", p)
+	}
+	activeBug = "snapshot-fallback-needs-log"
+	if p, err := start(t); p != nil {
+		t.Errorf("with the fix, NewRaft panicked: %v", p)
+	} else if err == nil {
+		t.Errorf("with the fix, NewRaft started from a snapshot the log doesn't follow")
+	} else {
+		t.Logf("with the fix: %v", err)
 	}
 }

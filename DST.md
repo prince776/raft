@@ -389,6 +389,40 @@ machine back (the test shows 20 entries going back to 10). Upstream's
 attempted fix for #697 (PR #704, closed) handles only a conflicting entry
 at the snapshot's index, not these.
 
+### 6.12 An unreadable newest snapshot makes raft panic at startup (availability)
+
+Found by phase 1 item 5 (disk errors), seeds 99 and 190 of
+`TestDSTDiskErrors`. At startup `restoreSnapshot` tries the snapshots
+newest first and silently falls back to an older one when one fails to
+restore; and `FileSnapshotStore.List` silently skips a snapshot whose
+metadata it can't read (meant for half-written directories). Either way
+raft restores an older snapshot, or none, and `NewRaft` then replays the
+log from that index and panics (`log not found`) where the newest
+snapshot had compacted it away: with two snapshots retained (Consul's
+setting) and `TrailingLogs` below a snapshot interval, the usual case.
+
+1. Seed 99: reading the newest snapshot's `state.bin` failed (EIO); raft
+   restored the one before (83), and entry 84 was gone: panic.
+2. Seed 190: reading the only snapshot's `meta.json` failed (EIO); List
+   returned nothing, raft started without a snapshot and found no entry 1.
+
+A transient error heals when the process restarts. A snapshot that stays
+unreadable (bit rot, a corrupt file) crash-loops the node forever, where a
+clean error was due; its state can't be recovered from that node either
+way, since the entries are gone.
+
+Fix (switch `snapshot-fallback-needs-log`): an older snapshot is restored
+only if the log holds every entry after it, and `NewRaft` returns an error
+instead of replaying a log that doesn't follow the restored snapshot.
+Evidence: `TestSnapshotFallbackGap` (raft's own helpers, the real
+filesystem: two snapshots, a log compacted past the older, the newest's
+`state.bin` removed) panics on correct raft every run and returns
+"failed to load any existing snapshots" with the fix;
+`TestDSTDiskErrorsFixed` (drawn retention, every fix on) passes 200 of
+200. Also noticed: `NewFileSnapshotStoreWithLogger` wraps its errors with
+`%v`, so callers can't tell a full disk (`errors.Is(err,
+syscall.ENOSPC)`) from other failures.
+
 ## 7. The bug benchmark
 
 `dstbench.json`: bugs behind switches (`bug(name)` in `dstbugs*.go`, only
@@ -456,7 +490,7 @@ exploration is; 4. guided exploration. Phase 1 items:
 2. ~~Slow and stale components~~ (done: design and what was built below)
 3. ~~Snapshots on the simulated disk~~ (done: below; errors are item 5)
 4. ~~Realistic clients on their own machines~~ (done: below)
-5. Store calls that fail (I/O error, disk full)
+5. ~~Store calls that fail (I/O error, disk full)~~ (done: below)
 6. ~~Clock extremes~~ (done: below)
 7. ~~Timeouts drawn per seed, raft's defaults included~~ (done: the
    configuration per seed, below; done before 3 to 6 by agreement, since 3
@@ -575,6 +609,36 @@ moved one known bug into the default sweeps:
   400), so `TestSnapshotBoundaryScripted` (raft's test helpers, as on the
   upstream branch) shows the bug on every run; the sweep stays as the
   fix's regression test.
+
+### Item 5: disk errors (as built)
+
+go-dst-kit's `Faults.DiskErrors` (now in `AllFaults`): a disk fills at a
+drawn time and stays full until the faults stop (writes that don't fit
+fail with ENOSPC, freeing space makes room), and fsyncs, writes and reads
+fail with EIO, a failed fsync losing the file's unsynced writes for good
+though the next fsync succeeds, as on Linux. raft answers a failure to
+persist its term or vote by panicking (fail-stop): the harness declares
+disk-error panics a process death (`Harness.OnPanic`), and the node
+restarts as a supervisor would restart it; any other panic still fails
+the run. Startup steps (opening the stores, bootstrap, `NewRaft`) retry
+on disk errors.
+
+`TestDSTDiskErrors` (crashes, disk faults, disk errors; five nodes, one
+snapshot kept): 200 of 200 seeds pass, with 143 fail-stop panics in the
+first 50. The new faults found, in order:
+
+- **A bug in the harness's log store** (seed 199, a non-linearizable
+  history: two acknowledged writes lost). After a failed write the store
+  left the record's bytes in the file to overwrite next time; a failed
+  fsync's data is never durable but stays readable, so a process
+  restarted after a kill (here a fail-stop panic) replayed the record as
+  stored, and records fsynced after it then sat after a hole that a power
+  loss opened: recovery stopped there. The store now cuts a failed record
+  from the file at once (`dstLogStore.failed`), and its contract test runs
+  with kills and disk errors (it failed before the fix: entries 17–37
+  recovered where 17–35 were acknowledged). raft's own FileSnapshotStore
+  passes the same contract under the same faults.
+- **raft finding 6.12** (seeds 99 and 190): above.
 
 ### Item 6: clock extremes (as built)
 

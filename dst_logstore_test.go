@@ -25,6 +25,9 @@ import (
 //   - Recovery: opening replays the file and truncates a torn or corrupt
 //     tail (the record a crash interrupted), then reads as of the last
 //     whole record.
+//   - A failed call leaves no trace: its record is cut from the file (a
+//     failed fsync's data is never durable, but stays readable until then,
+//     so a process restarted after a kill would otherwise replay it).
 //   - Reads see every completed call. GetLog of a missing index is
 //     ErrLogNotFound; FirstIndex and LastIndex are 0 for an empty log;
 //     Get of a missing key is an error, GetUint64 of one is 0 (as
@@ -53,6 +56,7 @@ type dstLogStore struct {
 	kv          map[string][]byte
 
 	noSync, splitBatches bool
+	dirty                bool // a failed write may have left bytes after off
 }
 
 // storeOp is one record: a change to the store.
@@ -163,16 +167,45 @@ func (s *dstLogStore) write(op storeOp) error {
 	binary.LittleEndian.PutUint32(rec, uint32(len(payload)))
 	binary.LittleEndian.PutUint32(rec[4:], crc32.Checksum(payload, crcTable))
 	copy(rec[8:], payload)
+	if s.dirty {
+		if err := s.cut(); err != nil {
+			return err
+		}
+	}
 	if _, err := s.f.WriteAt(rec, s.off); err != nil {
-		return err
+		return s.failed(err)
 	}
 	if !s.noSync {
 		if err := s.f.Sync(); err != nil {
-			return err
+			return s.failed(err)
 		}
 	}
 	s.off += int64(len(rec))
 	s.apply(op)
+	return nil
+}
+
+// failed handles a failed write: the record may be in the file, whole or
+// in part, but will never be durable (after a failed fsync, Linux drops the
+// data from the dirty set). Left there, a process restarted after a kill
+// would read it from the page cache as a stored record, and records
+// written after it would follow a hole once a power loss drops it. So the
+// file is cut back to the last durable record, now or before the next
+// write.
+func (s *dstLogStore) failed(err error) error {
+	s.dirty = true
+	if cerr := s.cut(); cerr != nil {
+		return errors.Join(err, cerr)
+	}
+	return err
+}
+
+// cut truncates the file to the end of the last durable record.
+func (s *dstLogStore) cut() error {
+	if err := s.f.Truncate(s.off); err != nil {
+		return err
+	}
+	s.dirty = false
 	return nil
 }
 

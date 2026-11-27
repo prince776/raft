@@ -21,3 +21,16 @@ func (r *Raft) holdsEntry(index, term uint64) bool {
 	var l Log
 	return r.logs.GetLog(index, &l) == nil && l.Term == term
 }
+
+// logFollows reports whether the log holds every entry after index (or
+// none at all): only then can raft restore a snapshot at index and replay
+// the log from it. Used by the experimental switch
+// snapshot-fallback-needs-log (DST.md 6.12).
+func (r *Raft) logFollows(index uint64) bool {
+	first, err1 := r.logs.FirstIndex()
+	last, err2 := r.logs.LastIndex()
+	if err1 != nil || err2 != nil {
+		return false
+	}
+	return last <= index || first <= index+1
+}

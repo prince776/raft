@@ -1,9 +1,11 @@
 package raft
 
 import (
+	"errors"
 	"fmt"
 	"maps"
 	"slices"
+	"syscall"
 	"testing"
 	"time"
 
@@ -71,6 +73,11 @@ func storeContract(h *dsttest.Harness, sc dstScenario) {
 	n := 0
 	h.Machine("store", func(w *dst.World) {
 		s, err := openDSTLogStore(w.FS(), "raft.log")
+		for errors.Is(err, syscall.EIO) || errors.Is(err, syscall.ENOSPC) { // passes: retry the startup
+			h.Sometimes("opening the store failed on the disk")
+			w.Sleep(20 * time.Millisecond)
+			s, err = openDSTLogStore(w.FS(), "raft.log")
+		}
 		if err != nil {
 			h.Fail(err)
 			return
@@ -103,8 +110,20 @@ func storeContract(h *dsttest.Harness, sc dstScenario) {
 			pending = &c
 			// A crash ends this goroutine inside the call: it doesn't return.
 			if err := c.do(s); err != nil {
-				h.Fail(fmt.Errorf("%s: %v", c.name, err))
-				return
+				// A disk error (Faults.DiskErrors): the call failed, so it
+				// must leave no trace, now or after a crash.
+				if !errors.Is(err, syscall.ENOSPC) && !errors.Is(err, syscall.EIO) {
+					h.Fail(fmt.Errorf("%s: %v", c.name, err))
+					return
+				}
+				h.Sometimes("a store call failed on the disk")
+				pending = nil
+				if got, err := modelOf(s); err != nil || !equalModels(got, model) {
+					h.Fail(fmt.Errorf("after %s failed (%v), the store reads %s, not the acknowledged %s (%v)", c.name, err, describe(got), describe(model), err))
+					return
+				}
+				w.Sleep(time.Duration(1+w.Rand().IntN(5)) * time.Millisecond)
+				continue
 			}
 			c.apply(model)
 			pending = nil
@@ -172,6 +191,14 @@ func storeOpts() dsttest.Options {
 // a store that skips fsync, or that writes a batch as one record per entry.
 func TestDSTLogStoreContract(t *testing.T) {
 	dsttest.Run(t, storeOpts(), func(h *dsttest.Harness) { storeContract(h, dstScenario{}) })
+	withErrors := storeOpts()
+	// Kills too: a failed write's bytes stay in the page cache, which a
+	// restarted process reads (fsyncgate's other half).
+	withErrors.Faults.DiskErrors, withErrors.Faults.Kill = true, true
+	dsttest.Run(t, withErrors, func(h *dsttest.Harness) {
+		storeContract(h, dstScenario{})
+		h.Expect("a store call failed on the disk")
+	})
 	for _, sc := range []dstScenario{{noSync: true}, {splitBatches: true}} {
 		o := storeOpts()
 		o.KeepGoing, o.DeterminismChecks = true, -1

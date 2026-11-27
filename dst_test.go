@@ -41,6 +41,19 @@ func TestDSTEverything(t *testing.T) {
 		func(h *dsttest.Harness) { sweepCluster(h, 5) })
 }
 
+// TestDSTDiskErrors: full disks and I/O errors (a failed fsync losing its
+// data, as on Linux) with crashes and disk faults, five nodes. raft panics
+// when it can't persist its term or vote (fail-stop; the harness restarts
+// it). Nodes keep one snapshot: with two, an unreadable newest snapshot
+// makes raft fall back to the older one and panic (DST.md 6.12), left to
+// TestDSTDiskErrorsFixed (dstbugs).
+func TestDSTDiskErrors(t *testing.T) {
+	dsttest.Run(t, dstOpts(dsttest.Faults{Crash: true, Disk: true, DiskErrors: true}),
+		func(h *dsttest.Harness) {
+			newCluster(h, clusterSpec{voters: 5, drawConfig: true, clients: 2, oneSnapshot: true})
+		})
+}
+
 // TestDSTFourNodes: an even-sized cluster (its quorum is 3 of 4, not
 // half), with crashes and partitions.
 func TestDSTFourNodes(t *testing.T) {

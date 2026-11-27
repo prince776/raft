@@ -626,6 +626,10 @@ func NewRaft(conf *Config, fsm FSM, logs LogStore, stable StableStore, snaps Sna
 
 	// Scan through the log for any configuration change entries.
 	snapshotIndex, _ := r.getLastSnapshot()
+	if bug("snapshot-fallback-needs-log") && !r.logFollows(snapshotIndex) {
+		first, _ := r.logs.FirstIndex()
+		return nil, fmt.Errorf("the log starts at %d, past the restored snapshot's index %d: a later snapshot couldn't be read", first, snapshotIndex)
+	}
 	lastappliedIndex := r.getLastApplied()
 	for index := max(snapshotIndex, lastappliedIndex) + 1; index <= lastLog.Index; index++ {
 		var entry Log
@@ -668,6 +672,10 @@ func (r *Raft) restoreSnapshot() error {
 
 	// Try to load in order of newest to oldest
 	for _, snapshot := range snapshots {
+		if bug("snapshot-fallback-needs-log") && !r.logFollows(snapshot.Index) {
+			r.logger.Error("not restoring a snapshot the log was compacted past", "id", snapshot.ID, "last-index", snapshot.Index)
+			continue
+		}
 		if success := r.tryRestoreSingleSnapshot(snapshot); !success {
 			continue
 		}
