@@ -305,11 +305,10 @@ func (c *cluster) Close() {
 
 	// Wait for shutdown
 	limit := c.w.AfterFunc(c.longstopTimeout, func() {
-		panic("timed out waiting for shutdown")
 		// We can't FailNowf here, and c.Failf won't do anything if we
 		// hang, so panic.
+		panic("timed out waiting for shutdown")
 	})
-
 	defer limit.Stop()
 
 	for _, f := range futures {

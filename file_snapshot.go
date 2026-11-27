@@ -8,7 +8,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
-	"github.com/prince776/go-dst-kit/dst"
+	"github.com/prince776/go-dst-kit/realworld"
 	"hash"
 	"hash/crc64"
 	"io"
@@ -20,6 +20,7 @@ import (
 	"time"
 
 	hclog "github.com/hashicorp/go-hclog"
+	"github.com/prince776/go-dst-kit/dst"
 )
 
 const (
@@ -56,7 +57,7 @@ type FileSnapshotSink struct {
 
 	noSync bool
 
-	stateFile *os.File
+	stateFile dst.File
 	stateHash hash.Hash64
 	buffered  *bufio.Writer
 
@@ -74,7 +75,7 @@ type fileSnapshotMeta struct {
 // reads are buffered and the file still gets closed.
 type bufferedFile struct {
 	bh *bufio.Reader
-	fh *os.File
+	fh dst.File
 }
 
 func (b *bufferedFile) Read(p []byte) (n int, err error) {
@@ -89,6 +90,16 @@ func (b *bufferedFile) Close() error {
 // on a base directory. The `retain` parameter controls how many
 // snapshots are retained. Must be at least 1.
 func NewFileSnapshotStoreWithLogger(base string, retain int, logger hclog.Logger) (*FileSnapshotStore, error) {
+	w, rel, err := realWorldAt(base)
+	if err != nil {
+		return nil, fmt.Errorf("snapshot path not accessible: %v", err)
+	}
+	return NewFileSnapshotStoreWithWorld(w, rel, retain, logger)
+}
+
+// NewFileSnapshotStoreWithWorld is NewFileSnapshotStoreWithLogger keeping
+// the snapshots on w's filesystem, under base (relative to its root).
+func NewFileSnapshotStoreWithWorld(w *dst.World, base string, retain int, logger hclog.Logger) (*FileSnapshotStore, error) {
 	if retain < 1 {
 		return nil, fmt.Errorf("must retain at least one snapshot")
 	}
@@ -102,7 +113,7 @@ func NewFileSnapshotStoreWithLogger(base string, retain int, logger hclog.Logger
 
 	// Ensure our path exists
 	path := filepath.Join(base, snapPath)
-	if err := os.MkdirAll(path, 0o755); err != nil && !os.IsExist(err) {
+	if err := w.FS().MkdirAll(path, 0o755); err != nil && !os.IsExist(err) {
 		return nil, fmt.Errorf("snapshot path not accessible: %v", err)
 	}
 
@@ -111,6 +122,7 @@ func NewFileSnapshotStoreWithLogger(base string, retain int, logger hclog.Logger
 		path:   path,
 		retain: retain,
 		logger: logger,
+		w:      w,
 	}
 
 	// Do a permissions test
@@ -137,7 +149,7 @@ func NewFileSnapshotStore(base string, retain int, logOutput io.Writer) (*FileSn
 // testPermissions tries to touch a file in our path to see if it works.
 func (f *FileSnapshotStore) testPermissions() error {
 	path := filepath.Join(f.path, testPath)
-	fh, err := os.Create(path)
+	fh, err := dst.Create(f.world().FS(), path)
 	if err != nil {
 		return err
 	}
@@ -146,7 +158,7 @@ func (f *FileSnapshotStore) testPermissions() error {
 		return err
 	}
 
-	if err = os.Remove(path); err != nil {
+	if err = f.world().FS().Remove(path); err != nil {
 		return err
 	}
 	return nil
@@ -173,7 +185,7 @@ func (f *FileSnapshotStore) Create(version SnapshotVersion, index, term uint64,
 	f.logger.Info("creating new snapshot", "path", path)
 
 	// Make the directory
-	if err := os.MkdirAll(path, 0o755); err != nil {
+	if err := f.world().FS().MkdirAll(path, 0o755); err != nil {
 		f.logger.Error("failed to make snapshot directly", "error", err)
 		return nil, err
 	}
@@ -207,7 +219,7 @@ func (f *FileSnapshotStore) Create(version SnapshotVersion, index, term uint64,
 
 	// Open the state file
 	statePath := filepath.Join(path, stateFilePath)
-	fh, err := os.Create(statePath)
+	fh, err := dst.Create(f.world().FS(), statePath)
 	if err != nil {
 		f.logger.Error("failed to create state file", "error", err)
 		return nil, err
@@ -247,7 +259,7 @@ func (f *FileSnapshotStore) List() ([]*SnapshotMeta, error) {
 // getSnapshots returns all the known snapshots.
 func (f *FileSnapshotStore) getSnapshots() ([]*fileSnapshotMeta, error) {
 	// Get the eligible snapshots
-	snapshots, err := os.ReadDir(f.path)
+	snapshots, err := f.world().FS().ReadDir(f.path)
 	if err != nil {
 		f.logger.Error("failed to scan snapshot directory", "error", err)
 		return nil, err
@@ -295,7 +307,7 @@ func (f *FileSnapshotStore) getSnapshots() ([]*fileSnapshotMeta, error) {
 func (f *FileSnapshotStore) readMeta(name string) (*fileSnapshotMeta, error) {
 	// Open the meta file
 	metaPath := filepath.Join(f.path, name, metaFilePath)
-	fh, err := os.Open(metaPath)
+	fh, err := dst.Open(f.world().FS(), metaPath)
 	if err != nil {
 		return nil, err
 	}
@@ -324,7 +336,7 @@ func (f *FileSnapshotStore) Open(id string) (*SnapshotMeta, io.ReadCloser, error
 
 	// Open the state file
 	statePath := filepath.Join(f.path, id, stateFilePath)
-	fh, err := os.Open(statePath)
+	fh, err := dst.Open(f.world().FS(), statePath)
 	if err != nil {
 		f.logger.Error("failed to open state file", "error", err)
 		return nil, nil, err
@@ -376,7 +388,7 @@ func (f *FileSnapshotStore) ReapSnapshots() error {
 	for i := f.retain; i < len(snapshots); i++ {
 		path := filepath.Join(f.path, snapshots[i].ID)
 		f.logger.Info("reaping snapshot", "path", path)
-		if err := os.RemoveAll(path); err != nil {
+		if err := f.world().FS().RemoveAll(path); err != nil {
 			f.logger.Error("failed to reap snapshot", "path", path, "error", err)
 			return err
 		}
@@ -407,7 +419,7 @@ func (s *FileSnapshotSink) Close() error {
 	// Close the open handles
 	if err := s.finalize(); err != nil {
 		s.logger.Error("failed to finalize snapshot", "error", err)
-		if delErr := os.RemoveAll(s.dir); delErr != nil {
+		if delErr := s.store.world().FS().RemoveAll(s.dir); delErr != nil {
 			s.logger.Error("failed to delete temporary snapshot directory", "path", s.dir, "error", delErr)
 			return delErr
 		}
@@ -422,13 +434,13 @@ func (s *FileSnapshotSink) Close() error {
 
 	// Move the directory into place
 	newPath := strings.TrimSuffix(s.dir, tmpSuffix)
-	if err := os.Rename(s.dir, newPath); err != nil {
+	if err := s.store.world().FS().Rename(s.dir, newPath); err != nil {
 		s.logger.Error("failed to move snapshot into place", "error", err)
 		return err
 	}
 
 	if !s.noSync && runtime.GOOS != "windows" { // skipping fsync for directory entry edits on Windows, only needed for *nix style file systems
-		parentFH, err := os.Open(s.parentDir)
+		parentFH, err := dst.Open(s.store.world().FS(), s.parentDir)
 		if err != nil {
 			s.logger.Error("failed to open snapshot parent directory", "path", s.parentDir, "error", err)
 			return err
@@ -464,7 +476,7 @@ func (s *FileSnapshotSink) Cancel() error {
 	}
 
 	// Attempt to remove all artifacts
-	return os.RemoveAll(s.dir)
+	return s.store.world().FS().RemoveAll(s.dir)
 }
 
 // finalize is used to close all of our resources.
@@ -505,8 +517,8 @@ func (s *FileSnapshotSink) writeMeta() error {
 	var err error
 	// Open the meta file
 	metaPath := filepath.Join(s.dir, metaFilePath)
-	var fh *os.File
-	fh, err = os.Create(metaPath)
+	var fh dst.File
+	fh, err = dst.Create(s.store.world().FS(), metaPath)
 	if err != nil {
 		return err
 	}
@@ -558,4 +570,26 @@ func (f *FileSnapshotStore) world() *dst.World {
 		return theRealWorld()
 	}
 	return f.w
+}
+
+// realWorldAt returns the real World rooted at the filesystem's root and
+// dir's path in it. dir is created if missing and its symbolic links
+// resolved (a World's root refuses absolute ones, such as macOS's /var).
+func realWorldAt(dir string) (*dst.World, string, error) {
+	if err := os.MkdirAll(dir, 0o755); err != nil { //dst:ok the real World's root
+		return nil, "", err
+	}
+	abs, err := filepath.Abs(dir)
+	if err == nil {
+		abs, err = filepath.EvalSymlinks(abs)
+	}
+	if err != nil {
+		return nil, "", err
+	}
+	root := filepath.VolumeName(abs) + string(filepath.Separator)
+	rel, err := filepath.Rel(root, abs)
+	if err != nil {
+		return nil, "", err
+	}
+	return realworld.New(realworld.Options{Dir: root}), rel, nil
 }

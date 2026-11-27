@@ -741,10 +741,9 @@ func TestRaft_RemoveFollower(t *testing.T) {
 	if err := future.Error(); err != nil {
 		t.Fatalf("err: %v", err)
 	}
-	theRealWorld(
 
 	// Wait a while
-	).Sleep(c.propagateTimeout)
+	theRealWorld().Sleep(c.propagateTimeout)
 
 	// Other nodes should have fewer peers
 	if configuration := c.getConfiguration(leader); len(configuration.Servers) != 2 {
@@ -784,14 +783,12 @@ func TestRaft_RemoveLeader(t *testing.T) {
 	if f.Error() != nil {
 		t.Fatalf("RemoveServer() returned error %v", f.Error())
 	}
-	theRealWorld(
 
 	// Wait a bit for log application
-	).Sleep(c.propagateTimeout)
 	theRealWorld().Sleep(c.propagateTimeout)
 
 	// Should have a new leader
-
+	theRealWorld().Sleep(c.propagateTimeout)
 	newLeader := c.Leader()
 	if newLeader == leader {
 		t.Fatalf("removed leader is still leader")
@@ -834,17 +831,15 @@ func TestRaft_RemoveLeader_NoShutdown(t *testing.T) {
 			}
 		}
 	}
-	theRealWorld(
 
 	// Wait a while
-	).Sleep(c.propagateTimeout)
+	theRealWorld().Sleep(c.propagateTimeout)
 
 	// Should have a new leader
 	newLeader := c.Leader()
-	theRealWorld(
 
 	// Wait a bit for log application
-	).Sleep(c.propagateTimeout)
+	theRealWorld().Sleep(c.propagateTimeout)
 
 	// Other nodes should have pulled the leader.
 	configuration := c.getConfiguration(newLeader)
@@ -888,7 +883,6 @@ func TestRaft_RemoveFollower_SplitCluster(t *testing.T) {
 	limit := theRealWorld().Now().Add(c.longstopTimeout)
 	for theRealWorld().Now().Before(limit) && numServers != 4 {
 		theRealWorld().Sleep(c.propagateTimeout)
-
 		configuration := c.getConfiguration(leader)
 		numServers = len(configuration.Servers)
 	}
@@ -1578,10 +1572,9 @@ func TestRaft_SnapshotRestore_PeerChange(t *testing.T) {
 	c2.trans = append(c2.trans, r.trans.(*InmemTransport))
 	c2.fsms = append(c2.fsms, r.fsm.(*MockFSM))
 	c2.FullyConnect()
-	theRealWorld(
 
 	// Wait a while.
-	).Sleep(c.propagateTimeout)
+	theRealWorld().Sleep(c.propagateTimeout)
 
 	// Ensure we elect a leader, and that we replicate to our new followers.
 	c2.EnsureSame(t)
@@ -1616,10 +1609,9 @@ func TestRaft_AutoSnapshot(t *testing.T) {
 	if err := future.Error(); err != nil {
 		t.Fatalf("err: %v", err)
 	}
-	theRealWorld(
 
 	// Wait for a snapshot to happen
-	).Sleep(c.propagateTimeout)
+	theRealWorld().Sleep(c.propagateTimeout)
 
 	// Check for snapshot
 	if snaps, _ := leader.snapshots.List(); len(snaps) == 0 {
@@ -1952,11 +1944,9 @@ func TestRaft_ReJoinFollower(t *testing.T) {
 	if err := future.Error(); err != nil {
 		t.Fatalf("err: %v", err)
 	}
-	theRealWorld(
 
 	// Other nodes should have fewer peers.
-	).Sleep(c.propagateTimeout)
-
+	theRealWorld().Sleep(c.propagateTimeout)
 	if configuration := c.getConfiguration(leader); len(configuration.Servers) != 2 {
 		t.Fatalf("too many peers: %v", configuration)
 	}
@@ -2396,7 +2386,6 @@ func TestRaft_PreVoteMixedCluster(t *testing.T) {
 			c.Followers()
 			c.Partition([]ServerAddress{leaderOld.localAddr})
 			theRealWorld().Sleep(c.propagateTimeout * 3)
-
 			leader := c.Leader()
 			require.NotEqual(t, leader.leaderID, leaderOld.leaderID)
 		})
@@ -2611,9 +2600,8 @@ func TestRaft_LeaderID_Propagated(t *testing.T) {
 			t.Fatalf("[ERR] err: %v", err)
 		}
 	}
-	theRealWorld(
 	// Wait a while
-	).Sleep(c.propagateTimeout)
+	theRealWorld().Sleep(c.propagateTimeout)
 
 	// Sanity check the cluster.
 	c.EnsureSame(t)
@@ -2753,7 +2741,6 @@ func TestRaft_LeadershipTransferWithWrites(t *testing.T) {
 						writerErr = err
 					}
 					theRealWorld().Sleep(time.Millisecond)
-
 				default:
 					panic("dstmigrate: no select case ran")
 				}
@@ -3218,10 +3205,9 @@ func TestRaft_VoteNotGranted_WhenNodeNotInCluster(t *testing.T) {
 	if err := future.Error(); err != nil {
 		t.Fatalf("err: %v", err)
 	}
-	theRealWorld(
 
 	// Wait a while
-	).Sleep(c.propagateTimeout)
+	theRealWorld().Sleep(c.propagateTimeout)
 
 	// Other nodes should have fewer peers
 	if configuration := c.getConfiguration(leader); len(configuration.Servers) != 2 {
@@ -3305,11 +3291,9 @@ func TestRaft_ClusterCanRegainStability_WhenNonVoterWithHigherTermJoin(t *testin
 	}
 
 	c.FullyConnect()
-	theRealWorld(
 
 	// Wait a while
-	).Sleep(c.propagateTimeout)
-
+	theRealWorld().Sleep(c.propagateTimeout)
 	// Check the term is now a new term
 	leader = c.Leader()
 	currentTerm := leader.getCurrentTerm()
@@ -3337,10 +3321,9 @@ func TestRaft_ClusterCanRegainStability_WhenNonVoterWithHigherTermJoin(t *testin
 		t.Fatalf("err: %v", err)
 	}
 	leader.AddVoter(followerRemoved.localID, followerRemoved.localAddr, 0, 0)
-	theRealWorld(
 
 	// Wait a while
-	).Sleep(c.propagateTimeout * 10)
+	theRealWorld().Sleep(c.propagateTimeout * 10)
 
 	// Write some logs to ensure they replicate
 	for i := 100; i < 200; i++ {
@@ -3407,9 +3390,8 @@ func TestRaft_FollowerRemovalNoElection(t *testing.T) {
 	c.trans[i] = n.trans.(*InmemTransport)
 	c.fsms[i] = n.fsm.(*MockFSM)
 	c.FullyConnect()
-	theRealWorld(
 	// There should be no re-election during this sleep
-	).Sleep(250 * time.Millisecond)
+	theRealWorld().Sleep(250 * time.Millisecond)
 
 	// Let things settle and make sure we recovered.
 	c.EnsureLeader(t, leader.localAddr)
@@ -3423,7 +3405,6 @@ func waitForState(follower *Raft, state RaftState) {
 	for follower.getState() != state && count < 1000 {
 		count++
 		theRealWorld().Sleep(1 * time.Millisecond)
-
 	}
 }
 
@@ -3436,7 +3417,6 @@ func waitForLeader(c *cluster) error {
 		}
 		count++
 		theRealWorld().Sleep(50 * time.Millisecond)
-
 	}
 	return errors.New("no leader elected")
 }
@@ -3478,10 +3458,9 @@ func TestRaft_runFollower_State_Transition(t *testing.T) {
 				goArg8 := env1.raft
 				theRealWorld().Go(func() { goArg8.runFollower() })
 			}
-			theRealWorld().Sleep(tt.fields.
 
-				// wait enough time to have HeartbeatTimeout
-				conf.HeartbeatTimeout * 3)
+			// wait enough time to have HeartbeatTimeout
+			theRealWorld().Sleep(tt.fields.conf.HeartbeatTimeout * 3)
 
 			// Check the follower loop set the right state
 			require.Equal(t, tt.expectedState, env1.raft.getState())
@@ -3519,9 +3498,8 @@ func TestRaft_runFollower_ReloadTimeoutConfigs(t *testing.T) {
 		ElectionTimeout:   50 * time.Millisecond,
 	}
 	require.NoError(t, env.raft.ReloadConfig(newCfg))
-	theRealWorld(
 	// wait enough time to have HeartbeatTimeout
-	).Sleep(3 * newCfg.HeartbeatTimeout)
+	theRealWorld().Sleep(3 * newCfg.HeartbeatTimeout)
 
 	// Check the follower loop set the right state
 	require.Equal(t, Candidate, env.raft.getState())

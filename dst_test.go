@@ -51,21 +51,30 @@ func TestDSTFourNodes(t *testing.T) {
 // membershipCluster is a cluster whose size is drawn per seed (1, 3, 5
 // or 7 voters, as deployed), with 3 spare machines and the membership
 // operator: even sizes and non-voters happen in passing, as changes go.
-func membershipCluster(h *dsttest.Harness) *simCluster { return membershipClusterWith(h, false) }
+func membershipCluster(h *dsttest.Harness, loss bool) *simCluster {
+	return membershipClusterWith(h, false, loss)
+}
 
-func membershipClusterWith(h *dsttest.Harness, defaultTimeouts bool) *simCluster {
+// loss: the sweep loses servers for good (Faults.Loss), which the
+// operator replaces.
+func membershipClusterWith(h *dsttest.Harness, defaultTimeouts, loss bool) *simCluster {
 	voters := []int{1, 3, 5, 7}[h.World().Rand().Stream("cluster size").IntN(4)]
 	c := newCluster(h, clusterSpec{voters: voters, spares: 3, operator: true, defaultTimeouts: defaultTimeouts, drawConfig: true, clients: 2})
 	h.Expect("membership: AddNonvoter", "membership: AddVoter", "membership: DemoteVoter", "membership: RemoveServer",
-		"a server was lost for good", "a lost server was removed", "a removed server was shut down")
+		"a removed server was shut down")
+	if loss {
+		h.Expect("a server was lost for good", "a lost server was removed")
+	}
 	return c
 }
 
 // TestDSTMembership: membership changes under crashes, disk faults,
-// partitions, network faults, and servers lost for good and replaced.
+// partitions and network faults. Servers lost for good and replaced are
+// left to TestDSTMembershipFixed (dstbugs build): with them, correct raft
+// stalls on some seeds (the stale-configuration stall, DST.md 6.1).
 func TestDSTMembership(t *testing.T) {
-	dsttest.Run(t, dstOpts(dsttest.Faults{Crash: true, Disk: true, Partition: true, Network: true, Loss: true}),
-		func(h *dsttest.Harness) { membershipCluster(h) })
+	dsttest.Run(t, dstOpts(dsttest.Faults{Crash: true, Disk: true, Partition: true, Network: true}),
+		func(h *dsttest.Harness) { membershipCluster(h, false) })
 }
 
 // TestDSTGray: five nodes under gray failure (slow and lossy links,

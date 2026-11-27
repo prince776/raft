@@ -112,20 +112,28 @@ func (o *operator) canLose(m *dsttest.Machine) bool {
 		return false
 	}
 	nd := o.c.node(ServerID(m.Name()))
-	cfg := l.raft.configurations.latest
-	if !hasVote(cfg, nd.id()) {
-		return true // a non-voter or a machine outside the cluster
-	}
-	voters, alive := 0, 0
-	for _, s := range cfg.Servers {
-		if s.Suffrage == Voter {
-			voters++
-			if n := o.c.node(s.ID); n != nil && !n.m.Lost() {
-				alive++
+	// The survivors must hold a majority of every configuration that may
+	// be in effect: the latest, and the committed one, since the latest
+	// may not have reached anyone yet (losing a leader whose additions
+	// were still unreplicated left a cluster of one lost voter).
+	for _, cfg := range []Configuration{l.raft.configurations.latest, l.raft.configurations.committed} {
+		if !hasVote(cfg, nd.id()) {
+			continue // a non-voter or a machine outside it
+		}
+		voters, alive := 0, 0
+		for _, s := range cfg.Servers {
+			if s.Suffrage == Voter {
+				voters++
+				if n := o.c.node(s.ID); n != nil && !n.m.Lost() {
+					alive++
+				}
 			}
 		}
+		if alive-1 <= voters/2 {
+			return false
+		}
 	}
-	return alive-1 > voters/2
+	return true
 }
 
 // lost takes the runner's ticket for a machine it lost for good.

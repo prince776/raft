@@ -18,32 +18,49 @@ import (
 // checks, and says so in its own words: run with -tags dstbugs.
 //
 // Verifies: the checks of dstClusterWith can fail.
-// Fails if: a re-inserted bug isn't caught by the check meant for it
-// within the seeds the benchmark caught it in (dstbench.json, 100 seeds:
+// Fails if: a re-inserted bug isn't caught by a check meant for it within
+// the seeds the benchmark caught it in (dstbench.json, 100 seeds:
 // vote-twice from run #4, skip-prev-log-term #33, accept-stale-leader #11).
+// A follower accepting a stale leader's appends diverges logs: since the
+// client service and file snapshots changed the timing, it shows mostly as
+// lost acknowledged writes and diverged sequences (and runs that never
+// finish), as a non-linearizable history on 1 of 200 seeds; the
+// linearizability check has its own planted bug (TestDSTCatchesNaiveReadIndex).
 func TestDSTChecksCatchBugs(t *testing.T) {
 	for _, c := range []struct {
-		bug, check string
-		faults     dsttest.Faults
-		nodes      int
+		bug    string
+		checks []string // any of them
+		faults dsttest.Faults
+		nodes  int
 	}{
-		{"vote-twice", "at most one leader per term", dsttest.Faults{Crash: true, Disk: true, Partition: true, Network: true}, 4},
-		{"skip-prev-log-term", "the nodes applied the same sequence", dsttest.Faults{Crash: true, Disk: true, Partition: true, Network: true, Pause: true}, 5},
-		{"accept-stale-leader", "the clients' history is linearizable", dsttest.Faults{Partition: true, Network: true}, 3},
+		{"vote-twice", []string{"at most one leader per term"}, dsttest.Faults{Crash: true, Disk: true, Partition: true, Network: true}, 4},
+		{"skip-prev-log-term", []string{"the nodes applied the same sequence"}, dsttest.Faults{Crash: true, Disk: true, Partition: true, Network: true, Pause: true}, 5},
+		{"accept-stale-leader", []string{"the clients' history is linearizable", "acknowledged writes survive", "the nodes applied the same sequence"},
+			dsttest.Faults{Partition: true, Network: true}, 3},
 	} {
 		t.Run(c.bug, func(t *testing.T) {
 			activeBug = c.bug
 			defer func() { activeBug = "" }()
-			o := dstOpts(c.faults)
-			o.Seeds, o.KeepGoing, o.DeterminismChecks = 50, true, -1
-			rep := dsttest.Sweep(o, func(h *dsttest.Harness) { dstCluster(h, c.nodes) })
-			for _, r := range rep.Failed {
-				if strings.Contains(r.Err.Error(), `"`+c.check+`"`) {
-					t.Logf("caught by %q: %d of %d seeds failed", c.check, len(rep.Failed), rep.Runs)
-					return
+			// Ten seeds at a time, stopping once a check meant for the bug
+			// caught it (most do within the first ten): up to 50 seeds.
+			caught, failed, runs := map[string]int{}, 0, 0
+			for first := uint64(1); first <= 50 && len(caught) == 0; first += 10 {
+				o := dstOpts(c.faults)
+				o.FirstSeed, o.Seeds, o.KeepGoing, o.DeterminismChecks = first, 10, true, -1
+				rep := dsttest.Sweep(o, func(h *dsttest.Harness) { dstCluster(h, c.nodes) })
+				failed, runs = failed+len(rep.Failed), runs+rep.Runs
+				for _, r := range rep.Failed {
+					for _, check := range c.checks {
+						if strings.Contains(r.Err.Error(), `"`+check+`"`) {
+							caught[check]++
+						}
+					}
 				}
 			}
-			t.Fatalf("%d of %d seeds failed, none by %q", len(rep.Failed), rep.Runs, c.check)
+			if len(caught) == 0 {
+				t.Fatalf("%d of %d seeds failed, none by %q", failed, runs, c.checks)
+			}
+			t.Logf("%d of %d seeds failed; caught by %v", failed, runs, caught)
 		})
 	}
 }
@@ -272,13 +289,28 @@ func TestBootstrapCrash(t *testing.T) {
 // build can't carry it as a regression sweep; with the fixes it must pass
 // every seed, which also shows those are the only causes.
 //
-// Fails if: any seed fails with candidate-check-unless-ahead and
-// bootstrap-log-first both on.
+// Fails if: any seed fails with knownFixes on.
 func TestDSTMembershipGrayFixed(t *testing.T) {
-	activeBug = "candidate-check-unless-ahead,bootstrap-log-first,snapshot-boundary-fix"
+	activeBug = knownFixes
 	defer func() { activeBug = "" }()
 	dsttest.Run(t, dstOpts(dsttest.Faults{Crash: true, Disk: true, Partition: true, Network: true, Loss: true, Gray: true}),
-		func(h *dsttest.Harness) { membershipClusterWith(h, true) })
+		func(h *dsttest.Harness) { membershipClusterWith(h, true, true) })
+}
+
+// knownFixes are the proposed fixes for the raft bugs found so far.
+const knownFixes = "candidate-check-unless-ahead,bootstrap-log-first,snapshot-boundary-fix"
+
+// TestDSTMembershipFixed: the membership sweep with servers lost for good
+// and replaced, with the proposed fixes on. Correct raft stalls on some
+// seeds (6.1), so the default build's TestDSTMembership leaves losses
+// out; with the fixes every seed must pass.
+//
+// Fails if: any seed fails with knownFixes on.
+func TestDSTMembershipFixed(t *testing.T) {
+	activeBug = knownFixes
+	defer func() { activeBug = "" }()
+	dsttest.Run(t, dstOpts(dsttest.Faults{Crash: true, Disk: true, Partition: true, Network: true, Loss: true}),
+		func(h *dsttest.Harness) { membershipCluster(h, true) })
 }
 
 // TestDSTSnapshotBoundary: with TrailingLogs 0 a follower's snapshot
@@ -291,8 +323,11 @@ func TestDSTMembershipGrayFixed(t *testing.T) {
 // snapshot is committed, so it matches; entries there are skipped; an
 // older snapshot is acknowledged without being installed.
 //
-// Fails if: correct raft passes every seed (nothing left to show), or any
-// seed fails with the fix.
+// Correct raft fails on few seeds (2 of 400 when found, none since
+// snapshots moved to the simulated disk), so showing the bug is left to
+// TestSnapshotBoundaryScripted; this sweep is the fix's regression test.
+//
+// Fails if: any seed fails with the fix.
 func TestDSTSnapshotBoundary(t *testing.T) {
 	defer func() { activeBug = "" }()
 	sweep := func(bug string) dsttest.Report {
@@ -302,11 +337,6 @@ func TestDSTSnapshotBoundary(t *testing.T) {
 		return dsttest.Sweep(o, func(h *dsttest.Harness) {
 			newCluster(h, clusterSpec{voters: 5, drawConfig: true, forceTrailing: true, forceTrailingLogs: 0})
 		})
-	}
-	if rep := sweep(""); len(rep.Failed) == 0 {
-		t.Errorf("correct raft passed all %d seeds with TrailingLogs 0", rep.Runs)
-	} else {
-		t.Logf("correct raft: %d of %d seeds failed, first: %v", len(rep.Failed), rep.Runs, rep.Failed[0].Err)
 	}
 	if rep := sweep("snapshot-boundary-fix"); len(rep.Failed) > 0 {
 		t.Errorf("with the fix, %d of %d seeds failed: %v", len(rep.Failed), rep.Runs, rep.Failed[0].Err)

@@ -452,8 +452,7 @@ exploration is; 4. guided exploration. Phase 1 items:
 
 1. ~~Permanent loss and replacement through membership changes~~ (done)
 2. ~~Slow and stale components~~ (done: design and what was built below)
-3. Snapshots on the simulated disk (`FileSnapshotStore`; dstmigrate must
-   learn `os` file I/O), with crashes and errors
+3. ~~Snapshots on the simulated disk~~ (done: below; errors are item 5)
 4. ~~Realistic clients on their own machines~~ (done: below)
 5. Store calls that fail (I/O error, disk full)
 6. ~~Clock extremes~~ (done: below)
@@ -536,6 +535,45 @@ each found as a failing seed and fixed in the harness, not in raft:
   wait ten election timeouts (at least 5s), and the membership check
   waits for the members to converge instead of looking once.
 
+### Item 3: snapshots on the simulated disk (as built)
+
+Every node now keeps its snapshots with raft's own `FileSnapshotStore`, in
+`snap/` on its simulated disk, so crashes, power loss and disk faults reach
+snapshots as they reach the log. dstmigrate rewrites the store's `os` file
+I/O to the World's FS (`-real-fs` keeps it in raft's tests and
+`peersjson.go`, which use real paths); `NewFileSnapshotStoreWithWorld`
+takes the World, and with none the store uses the real World rooted at
+the filesystem's root, so upstream's tests pass unchanged (including the
+one that deletes the store's directory). Snapshots retained are drawn per
+seed (1 or 2).
+
+`TestDSTSnapshotStoreContract`: through crashes, a snapshot whose Close
+returned is durable and reads back byte for byte, and a crash inside
+Close leaves the new snapshot or the previous one; 400 seeds pass, and a
+store with fsync off is caught on 161 of 200. The store fsyncs the state
+file, the metadata and, after the rename, the parent directory, but never
+the snapshot's own directory: safe on the disk model's journaled
+directories (as on ext4 and XFS), unsafe only under bare POSIX rules, a
+hardening note for upstream rather than a finding. A snapshot directory
+without `meta.json` seen after a crash was a reap that power cut between
+removing the file and the directory; raft skips it, correctly.
+
+The new timing exposed two harness weaknesses (fixed in the harness) and
+moved one known bug into the default sweeps:
+- The operator lost a server for good when the leader's latest
+  configuration had a majority without it, though that configuration had
+  reached nobody: losing the leader lost the only copy (a one-voter
+  cluster of a lost voter). It now requires a majority without the server
+  in the committed configuration too.
+- Membership seed 148 stalled on the stale-configuration bug (6.1). The
+  default build's `TestDSTMembership` no longer loses servers for good;
+  `TestDSTMembershipFixed` (dstbugs) does, with the fixes on: 400 seeds
+  pass, as `TestDSTMembershipGrayFixed` does.
+- The snapshot-boundary sweep no longer hits 6.11 on correct raft (0 of
+  400), so `TestSnapshotBoundaryScripted` (raft's test helpers, as on the
+  upstream branch) shows the bug on every run; the sweep stays as the
+  fix's regression test.
+
 ### Item 6: clock extremes (as built)
 
 `TestDSTClocks`: five nodes, every machine's clock offset by up to an hour
@@ -614,7 +652,14 @@ differs from the design:
 The fork builds against a local go-dst-kit through a `go.work` (not
 committed) next to it. Go 1.25 (`GOTOOLCHAIN=go1.25.0`).
 
+Checks come in two tiers (`dst-check.sh`): `quick` after every change
+(about 75s: vet, small sweeps, the contract, planted-bug and scripted-bug
+tests) and `full` before a commit, in the background (every sweep at 200
+seeds, the fixed sweeps at 400). Both cap sweeps at 4 cores.
+
 ```sh
+./dst-check.sh quick                             # after every change
+./dst-check.sh full                              # before a commit
 go test -run TestDST .                           # every sweep
 go test -run TestDSTMembership . -dst.seeds=200  # more seeds
 go test -run '^TestDSTMembership$' . -dst.seed=6 -dst.v   # replay one seed, with the event log

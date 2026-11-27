@@ -103,9 +103,9 @@ func TestEmitsLogStoreMetrics(t *testing.T) {
 		goArg7 := time.Millisecond
 		theRealWorld().Go(func() { emitLogStoreMetrics(theRealWorld(), s, goArg6, goArg7, stopCh) })
 	}
-	theRealWorld().Sleep(5 * time.Millisecond)
 
 	// Wait for at least one interval
+	theRealWorld().Sleep(5 * time.Millisecond)
 
 	got := getCurrentGaugeValue(t, sink, "raft.test.foo.oldestLogAge")
 

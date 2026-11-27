@@ -455,7 +455,6 @@ func TestNetworkTransport_AppendEntriesPipeline_CloseStreams(t *testing.T) {
 			if cancelStreams && i == 10 {
 				trans1.CloseStreams()
 				theRealWorld().Sleep(10 * time.Millisecond)
-
 			}
 
 			out := new(AppendEntriesResponse)
@@ -1004,10 +1003,9 @@ func TestNetworkTransport_ListenBackoff(t *testing.T) {
 	}
 
 	theRealWorld().Go(func() { transport.listen() })
-	theRealWorld().Sleep(testTime)
 
 	// sleep (+yield) for testTime seconds before asking the accept loop to shut down
-
+	theRealWorld().Sleep(testTime)
 	_ = transport.Close()
 
 	// Verify that the method exited (but without block this test)

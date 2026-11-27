@@ -134,7 +134,6 @@ func WaitFor(env *RaftEnv, state RaftState) error {
 	for env.raft.State() != state {
 		if theRealWorld().Now().Before(limit) {
 			theRealWorld().Sleep(10 * time.Millisecond)
-
 		} else {
 			return fmt.Errorf("failed to transition to state %v", state)
 		}
@@ -156,7 +155,6 @@ CHECK:
 	return nil, fmt.Errorf("failed to find node in %v state", state)
 WAIT:
 	theRealWorld().Sleep(10 * time.Millisecond)
-
 	goto CHECK
 }
 
@@ -164,7 +162,6 @@ func WaitFuture(f Future) error {
 	timer := theRealWorld().AfterFunc(1000*time.Millisecond, func() {
 		panic(fmt.Errorf("timeout waiting for future %v", f))
 	})
-
 	defer timer.Stop()
 	return f.Error()
 }
@@ -210,7 +207,6 @@ ERR:
 	}
 	first.fsm.Unlock()
 	theRealWorld().Sleep(20 * time.Millisecond)
-
 	first.fsm.Lock()
 	goto CHECK
 }
@@ -292,12 +288,11 @@ func TestRaft_Integ(t *testing.T) {
 
 	// snapshot the leader [leaders log should be compacted past the disconnected follower log now]
 	NoErr(WaitFuture(leader.raft.Snapshot()), t)
-	theRealWorld(
 
 	// Unfortunately we need to wait for the leader to start backing off RPCs to the down follower
 	// such that when the follower comes back up it'll run an election before it gets an rpc from
 	// the leader
-	).Sleep(time.Second * 5)
+	theRealWorld().Sleep(time.Second * 5)
 
 	// start the now out of date follower back up
 	disconnected.Restart(t)
@@ -306,7 +301,6 @@ func TestRaft_Integ(t *testing.T) {
 	timeout := theRealWorld().Now().Add(time.Second * 10)
 	for disconnected.raft.getLastApplied() < leader.raft.getLastApplied() {
 		theRealWorld().Sleep(time.Millisecond)
-
 		if theRealWorld().Now().After(timeout) {
 			t.Fatalf("Gave up waiting for follower to get caught up to leader")
 		}
@@ -409,11 +403,10 @@ func TestRaft_RestartFollower_LongInitialHeartbeat(t *testing.T) {
 			NoErr(err, t)
 
 			CheckConsistent(append([]*RaftEnv{env1}, envs...), t)
-			theRealWorld(
 			// TODO without this sleep, the restarted follower doesn't have any stored config
 			// and aborts the election because it doesn't know of any peers.  Shouldn't
 			// CheckConsistent prevent that?
-			).Sleep(time.Second)
+			theRealWorld().Sleep(time.Second)
 
 			// shutdown a follower
 			disconnected := envs[len(envs)-1]
@@ -443,12 +436,11 @@ func TestRaft_RestartFollower_LongInitialHeartbeat(t *testing.T) {
 			for _, env := range allEnvs {
 				env.raft.RegisterObserver(NewObserver(leaderCh, false, seeNewLeader))
 			}
-			theRealWorld(
 
 			// Unfortunately we need to wait for the leader to start backing off RPCs to the down follower
 			// such that when the follower comes back up it'll run an election before it gets an rpc from
 			// the leader
-			).Sleep(time.Second * 5)
+			theRealWorld().Sleep(time.Second * 5)
 
 			if tt.restartInitialTimeouts != 0 {
 				disconnected.conf.HeartbeatTimeout = tt.restartInitialTimeouts
@@ -456,6 +448,7 @@ func TestRaft_RestartFollower_LongInitialHeartbeat(t *testing.T) {
 			}
 			disconnected.logger.Info("restarting follower")
 			disconnected.Restart(t)
+
 			theRealWorld().Sleep(time.Second * 2)
 
 			if tt.expectNewLeader {
@@ -475,10 +468,8 @@ func TestRaft_RestartFollower_LongInitialHeartbeat(t *testing.T) {
 						ElectionTimeout:   250 * time.Millisecond,
 					}), t)
 				}
-				theRealWorld(
 				// Make sure that reload by itself doesn't trigger a vote
-				).Sleep(300 * time.Millisecond)
-
+				theRealWorld().Sleep(300 * time.Millisecond)
 				require.Equal(t, uint32(0), atomic.LoadUint32(requestVotes))
 
 				// Stop the leader, ensure that we don't see a request vote within the first 50ms
@@ -490,10 +481,8 @@ func TestRaft_RestartFollower_LongInitialHeartbeat(t *testing.T) {
 				env1.logger.Info("stopping leader")
 				env1.Shutdown()
 				theRealWorld().Sleep(50 * time.Millisecond)
-
 				require.Equal(t, uint32(0), atomic.LoadUint32(requestVotes))
 				theRealWorld().Sleep(600 * time.Millisecond)
-
 				require.NotEqual(t, uint32(0), atomic.LoadUint32(requestVotes))
 			}
 
@@ -549,7 +538,6 @@ func TestRaft_PreVote_LeaderSpam(t *testing.T) {
 	theRealWorld().Go(func() {
 		for {
 			ticker := theRealWorld().NewTicker(conf.HeartbeatTimeout / 2)
-
 			for _, f := range followers {
 				rsp := RequestPreVoteResponse{}
 				reqPreVote := RequestPreVoteRequest{
@@ -578,6 +566,7 @@ func TestRaft_PreVote_LeaderSpam(t *testing.T) {
 			}
 		}
 	})
+
 	theRealWorld().Sleep(time.Second)
 
 	// for all followers ignore heartbeat from current leader, so we can transition to candidate state.
@@ -604,7 +593,6 @@ func TestRaft_PreVote_LeaderSpam(t *testing.T) {
 		})
 	}
 	theRealWorld().Sleep(1 * time.Second)
-
 	// New leader should be one of the  former followers.
 	_, err = WaitForAny(Leader, followers)
 	NoErr(err, t)

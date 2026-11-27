@@ -13,9 +13,7 @@ package raft
 // memory outside the simulation (for now) and survive crashes whole.
 
 import (
-	"bytes"
 	"fmt"
-	"io"
 	"os"
 	"time"
 
@@ -63,12 +61,13 @@ type raftKnobs struct {
 	maxAppend                int    // MaxAppendEntries: entries per AppendEntries (raft's default 64)
 	trailingLogs             uint64 // entries kept after a snapshot: fewer means more snapshot installs
 	threshold                uint64 // SnapshotThreshold: entries between snapshots
+	retain                   int    // snapshots FileSnapshotStore keeps (Consul: 2)
 	batchApply               bool   // BatchApplyCh
 }
 
 func (k raftKnobs) String() string {
-	return fmt.Sprintf("timeouts x%.2f (election x%.1f, lease x%.2f), pre-vote off %v, max append %d, trailing logs %d, snapshot threshold %d, batch apply %v",
-		k.scale, k.electionX, k.leaseX, k.preVoteDisabled, k.maxAppend, k.trailingLogs, k.threshold, k.batchApply)
+	return fmt.Sprintf("timeouts x%.2f (election x%.1f, lease x%.2f), pre-vote off %v, max append %d, trailing logs %d, snapshot threshold %d, batch apply %v, snapshots retained %d",
+		k.scale, k.electionX, k.leaseX, k.preVoteDisabled, k.maxAppend, k.trailingLogs, k.threshold, k.batchApply, k.retain)
 }
 
 // drawKnobs draws a configuration from its own stream (so the rest of the
@@ -87,6 +86,7 @@ func drawKnobs(h *dsttest.Harness, defaultTimeouts bool) raftKnobs {
 		trailingLogs: []uint64{32, 4}[r.IntN(2)],
 		threshold:    []uint64{64, 16}[r.IntN(2)],
 		batchApply:   r.IntN(2) == 0,
+		retain:       1 + r.IntN(2),
 	}
 	if defaultTimeouts {
 		// Gray failure: slow links add up to ~450ms each way, and raft's
@@ -137,7 +137,7 @@ type dstNode struct {
 	name    string
 	initial bool // bootstrapped as a voter (else a spare)
 	logs    *dstLogStore
-	snaps   *dstSnapshotStore
+	snaps   *dstSnapshots
 	fsm     *kvFSM
 	raft    *Raft
 	m       *dsttest.Machine
@@ -197,7 +197,7 @@ func newCluster(h *dsttest.Harness, spec clusterSpec) *simCluster {
 	}
 	var initial []Server
 	for i := range spec.voters + spec.spares {
-		nd := &dstNode{name: fmt.Sprintf("n%d", i), initial: i < spec.voters, snaps: &dstSnapshotStore{}}
+		nd := &dstNode{name: fmt.Sprintf("n%d", i), initial: i < spec.voters}
 		c.nodes = append(c.nodes, nd)
 		if nd.initial {
 			initial = append(initial, Server{ID: nd.id(), Address: nd.addr()})
@@ -231,10 +231,12 @@ func (c *simCluster) boot(nd *dstNode, w *dst.World, initial []Server) {
 			h.Fail(err)
 			return
 		}
-		nd.snaps = &dstSnapshotStore{}
+		if err := w.FS().RemoveAll("snap"); err != nil {
+			h.Fail(err)
+			return
+		}
 		h.Sometimes("a node lost its disk")
 	}
-	nd.snaps.w = w
 	logs, err := openDSTLogStore(w.FS(), "raft.log")
 	if err != nil {
 		h.Fail(err)
@@ -265,6 +267,14 @@ func (c *simCluster) boot(nd *dstNode, w *dst.World, initial []Server) {
 	}
 	trans := NewNetworkTransportWithConfig(&NetworkTransportConfig{Stream: stream, MaxPool: 3, Timeout: transTimeout,
 		Logger: hclog.NewNullLogger(), World: w})
+	retain := 1
+	if c.knobs != nil {
+		retain = c.knobs.retain
+	}
+	if nd.snaps, err = openDSTSnapshots(w, retain, conf.Logger); err != nil {
+		h.Fail(err)
+		return
+	}
 	if nd.initial {
 		if ok, _ := HasExistingState(nd.logs, nd.logs, nd.snaps); !ok {
 			if err := BootstrapCluster(conf, nd.logs, nd.logs, nd.snaps, trans, Configuration{Servers: initial}); err != nil {
@@ -340,85 +350,54 @@ func (c *simCluster) patience() time.Duration {
 	return 5 * time.Second
 }
 
-// dstSnapshotStore keeps a node's latest snapshot in memory, outside the
-// simulation, so crashes don't lose it. Unlike raft's InmemSnapshotStore,
-// which replaces its snapshot when one is created, it publishes a snapshot
-// only when its sink is closed: a crash while one is being written leaves
-// the previous one, as a store that writes a temporary file and renames it
-// does. (Phase 1 item 3 replaces it with FileSnapshotStore on the
-// simulated disk.)
-type dstSnapshotStore struct {
-	mu   dst.Mutex
-	w    *dst.World
-	meta *SnapshotMeta // the latest published snapshot, or nil
-	data []byte
+// dstSnapshots is raft's FileSnapshotStore on the node's simulated disk
+// (in "snap"), so crashes and disk faults reach snapshots as they reach
+// the log. It records the index of the latest snapshot it holds, for
+// checks between scheduling steps, which can't use the World: found on
+// disk at boot, raised when a sink's Close succeeds (snapshots taken and
+// installed alike). Between a crash and the next boot it may over-report
+// what survived, which can only hide a violation, never invent one.
+type dstSnapshots struct {
+	*FileSnapshotStore
+	latest uint64
+}
+
+func openDSTSnapshots(w *dst.World, retain int, logger hclog.Logger) (*dstSnapshots, error) {
+	fss, err := NewFileSnapshotStoreWithWorld(w, "snap", retain, logger.Named("snapshot"))
+	if err != nil {
+		return nil, err
+	}
+	s := &dstSnapshots{FileSnapshotStore: fss}
+	if list, err := fss.List(); err == nil && len(list) > 0 {
+		s.latest = list[0].Index
+	}
+	return s, nil
+}
+
+func (s *dstSnapshots) Create(version SnapshotVersion, index, term uint64, configuration Configuration,
+	configurationIndex uint64, trans Transport) (SnapshotSink, error) {
+	sink, err := s.FileSnapshotStore.Create(version, index, term, configuration, configurationIndex, trans)
+	if err != nil {
+		return nil, err
+	}
+	return &dstSnapshotSink{SnapshotSink: sink, s: s, index: index}, nil
 }
 
 type dstSnapshotSink struct {
-	s    *dstSnapshotStore
-	meta SnapshotMeta
-	buf  bytes.Buffer
-	done bool
+	SnapshotSink
+	s     *dstSnapshots
+	index uint64
 }
 
-func (s *dstSnapshotStore) Create(version SnapshotVersion, index, term uint64, configuration Configuration,
-	configurationIndex uint64, trans Transport) (SnapshotSink, error) {
-	if version != 1 {
-		return nil, fmt.Errorf("unsupported snapshot version %d", version)
-	}
-	return &dstSnapshotSink{s: s, meta: SnapshotMeta{Version: version, ID: snapshotName(s.w, term, index), Index: index, Term: term,
-		Peers: encodePeers(configuration, trans), Configuration: configuration, ConfigurationIndex: configurationIndex}}, nil
-}
-
-func (s *dstSnapshotStore) List() ([]*SnapshotMeta, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.meta == nil {
-		return nil, nil
-	}
-	m := *s.meta
-	return []*SnapshotMeta{&m}, nil
-}
-
-func (s *dstSnapshotStore) Open(id string) (*SnapshotMeta, io.ReadCloser, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.meta == nil || s.meta.ID != id {
-		return nil, nil, fmt.Errorf("snapshot %s not found", id)
-	}
-	m := *s.meta
-	return &m, io.NopCloser(bytes.NewReader(s.data)), nil
-}
-
-func (k *dstSnapshotSink) Write(p []byte) (int, error) {
-	n, err := k.buf.Write(p)
-	k.meta.Size += int64(n)
-	return n, err
-}
-
-// Close publishes the snapshot.
 func (k *dstSnapshotSink) Close() error {
-	if k.done {
-		return nil
+	err := k.SnapshotSink.Close()
+	if err == nil && k.index > k.s.latest {
+		k.s.latest = k.index
 	}
-	k.done = true
-	k.s.mu.Lock()
-	defer k.s.mu.Unlock()
-	m := k.meta
-	k.s.meta, k.s.data = &m, bytes.Clone(k.buf.Bytes())
-	return nil
+	return err
 }
 
-// Cancel drops the snapshot.
-func (k *dstSnapshotSink) Cancel() error {
-	k.done = true
-	return nil
-}
-
-func (k *dstSnapshotSink) ID() string { return k.meta.ID }
-
-// covers reports whether the latest published snapshot includes index
-// (for checks between scheduling steps: no lock).
-func (s *dstSnapshotStore) covers(index uint64) bool {
-	return s != nil && s.meta != nil && s.meta.Index >= index
+// covers reports whether the node's latest snapshot includes index.
+func (s *dstSnapshots) covers(index uint64) bool {
+	return s != nil && s.latest >= index
 }
