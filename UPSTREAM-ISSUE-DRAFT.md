@@ -121,3 +121,73 @@ A leader that is demoted (`DemoteVoter`, not removed) steps down and, with
 localID)` sets `stepDown`; log: `removed ourself, shutting down`), though
 it remains a member as a non-voter. A demoted follower keeps running. Is
 that intended?
+
+---
+
+<!-- SECOND DRAFT, a separate issue. Not posted; Prince decides. -->
+
+# A follower mishandles its own snapshot boundary: rejected appends, state rolled back, livelock, panic (related to #697)
+
+## Summary
+
+Two gaps at a follower's snapshot boundary, both reachable with ordinary
+settings:
+
+1. **`appendEntries` rejects a previous entry the follower's snapshot
+   covers.** It looks `PrevLogEntry` up in the log unless it equals the
+   last entry. With few trailing logs (`TrailingLogs` 0 is accepted), a
+   follower holding a snapshot up to S and a log of only S+1 rejects an
+   append whose previous entry is S (or below S with entries crossing it),
+   though everything at or below its snapshot is committed and so matches
+   any leader's log.
+2. **`installSnapshot` installs a snapshot the follower already has
+   past.** Handed a snapshot older than its applied state, the follower
+   restores it: its applied index and state machine move back in time.
+   Raft's Figure 13, rule 6, says a follower that holds the snapshot's last
+   entry keeps its log and doesn't reset.
+
+Together: the leader, seeing the rejection, backs off and sends its own
+(older) snapshot; the follower installs it and rolls back; the entries
+between the two snapshots now exist nowhere on the follower, so every
+later append fails and the leader resends the snapshot, round after round
+(the livelock of #697, by another path). When the commit index passes the
+older snapshot, applying the next entry finds no log and raft panics
+(`log not found`). Part 2 alone needs no special setting: any follower
+sent an older snapshot rolls back.
+
+## Reproduction
+
+Branch `fix/snapshot-boundary` of <https://github.com/prince776/raft>
+(base `dd4346d`) adds two tests using raft's own helpers; both fail every
+run on `main` and pass with the fix:
+
+- `TestRaft_AppendEntries_PrevLogAtSnapshotBoundary`: an append whose
+  previous entry is the follower's snapshot index, or inside the snapshot
+  with entries crossing it.
+- `TestRaft_InstallSnapshot_IgnoresSnapshotOlderThanApplied`: an older
+  snapshot sent to an up-to-date follower (its state machine goes from 20
+  entries back to 10 on `main`).
+
+Found with deterministic simulation (go-dst-kit), seed 11 of a sweep with
+crashes, disk faults and partitions that drew `TrailingLogs` 0; the
+sequence above is from raft's own log.
+
+## Possible fix (on the branch)
+
+1. In `appendEntries`, a previous entry at or below the follower's last
+   snapshot index matches (committed entries match the leader's), and
+   incoming entries at or below it are skipped rather than compared.
+2. In `installSnapshot`, after validating the request: if the follower
+   holds the snapshot's last entry (in its log with the same term, or
+   covered by its own snapshot), acknowledge without installing.
+
+A first version of (2) skipped any snapshot ending at or before the
+applied index; simulation found it could livelock (a follower whose
+applied index was ahead of both its log and its snapshot acknowledged
+every snapshot without being able to continue from it), so the branch
+follows rule 6 exactly. Upstream's suite passes with the fix.
+
+## Related
+
+- #697 (Antithesis): InstallSnapshot livelock. PR #704 (closed) addressed
+  a conflicting entry at the snapshot's index, not these two cases.

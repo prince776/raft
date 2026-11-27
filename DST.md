@@ -378,7 +378,9 @@ livelock: a follower whose applied index ran ahead of both its log and
 its own snapshot (an installed snapshot later replaced by an older local
 one, another oddity) acknowledged every snapshot without being able to
 continue from its end. The bug also shows with TrailingLogs 4, not only 0. Evidence: `TestDSTSnapshotBoundary` (TrailingLogs 0, 400
-seeds: correct raft fails 2, the fix 0); upstream-style tests
+seeds: correct raft failed 2 when found, none since snapshots moved to the
+simulated disk; the fix 0); `TestSnapshotBoundaryScripted` (dstbugs:
+both cases fail on correct raft every run, pass with the fix); upstream-style tests
 `TestRaft_AppendEntries_PrevLogAtSnapshotBoundary` and
 `TestRaft_InstallSnapshot_IgnoresSnapshotOlderThanApplied` fail every run
 on upstream and pass with the fix; upstream's suite passes. Part (2) needs
