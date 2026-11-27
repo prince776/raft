@@ -538,7 +538,10 @@ func TestRaft_ApplyConcurrent(t *testing.T) {
 
 	// Concurrently apply
 	for i := 0; i < sz; i++ {
-		theRealWorld().Go(func() { applyF(i) })
+		{
+			goArg9 := i
+			theRealWorld().Go(func() { applyF(goArg9) })
+		}
 	}
 
 	// Wait to finish
@@ -588,16 +591,19 @@ func TestRaft_ApplyConcurrent_Timeout(t *testing.T) {
 	// Enough enqueues should cause at least one timeout...
 	var didTimeout int32
 	for i := 0; (i < 5000) && (atomic.LoadInt32(&didTimeout) == 0); i++ {
-		theRealWorld().Go(func() {
-			func(i int) {
-				future := leader.Apply([]byte(fmt.Sprintf("test%d", i)), time.Microsecond)
-				if future.Error() == ErrEnqueueTimeout {
-					atomic.StoreInt32(&didTimeout, 1)
-				}
-			}(
+		{
+			goArg10 :=
 
-				i)
-		})
+				i
+			theRealWorld().Go(func() {
+				func(i int) {
+					future := leader.Apply([]byte(fmt.Sprintf("test%d", i)), time.Microsecond)
+					if future.Error() == ErrEnqueueTimeout {
+						atomic.StoreInt32(&didTimeout, 1)
+					}
+				}(goArg10)
+			})
+		}
 
 		// Give the leader loop some other things to do in order to
 		// increase the odds of a timeout.
@@ -3455,8 +3461,8 @@ func TestRaft_runFollower_State_Transition(t *testing.T) {
 
 			// run the follower loop exclusively
 			{
-				goArg8 := env1.raft
-				theRealWorld().Go(func() { goArg8.runFollower() })
+				goArg11 := env1.raft
+				theRealWorld().Go(func() { goArg11.runFollower() })
 			}
 
 			// wait enough time to have HeartbeatTimeout
@@ -3486,8 +3492,8 @@ func TestRaft_runFollower_ReloadTimeoutConfigs(t *testing.T) {
 
 	// run the follower loop exclusively
 	{
-		goArg9 := env.raft
-		theRealWorld().Go(func() { goArg9.runFollower() })
+		goArg12 := env.raft
+		theRealWorld().Go(func() { goArg12.runFollower() })
 	}
 
 	newCfg := ReloadableConfig{

@@ -99,9 +99,8 @@ func TestEmitsLogStoreMetrics(t *testing.T) {
 	defer stopCh.Close()
 
 	{
-		goArg6 := []string{"foo"}
-		goArg7 := time.Millisecond
-		theRealWorld().Go(func() { emitLogStoreMetrics(theRealWorld(), s, goArg6, goArg7, stopCh) })
+		goArg7 := []string{"foo"}
+		theRealWorld().Go(func() { emitLogStoreMetrics(theRealWorld(), s, goArg7, time.Millisecond, stopCh) })
 	}
 
 	// Wait for at least one interval

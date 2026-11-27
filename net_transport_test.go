@@ -1002,7 +1002,10 @@ func TestNetworkTransport_ListenBackoff(t *testing.T) {
 		shutdownCh: dst.MakeChan[struct{}](theRealWorld(), 0),
 	}
 
-	theRealWorld().Go(func() { transport.listen() })
+	{
+		goArg8 := transport.listen
+		theRealWorld().Go(func() { goArg8() })
+	}
 
 	// sleep (+yield) for testTime seconds before asking the accept loop to shut down
 	theRealWorld().Sleep(testTime)

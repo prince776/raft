@@ -40,7 +40,10 @@ func TestDeferFutureConcurrent(t *testing.T) {
 	want := errors.New("x")
 	var f deferError
 	f.init(realworld.New(realworld.Options{}))
-	theRealWorld().Go(func() { f.respond(want) })
+	{
+		goArg6 := f.respond
+		theRealWorld().Go(func() { goArg6(want) })
+	}
 	if got := f.Error(); got != want {
 		t.Errorf("unexpected error result; got %#v want %#v", got, want)
 	}
