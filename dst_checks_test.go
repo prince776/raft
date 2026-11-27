@@ -4,6 +4,7 @@ package raft
 // whatever the faults, within raft's fault model.
 
 import (
+	"errors"
 	"fmt"
 	"maps"
 	"slices"
@@ -139,7 +140,7 @@ func (c *simCluster) checks() {
 	h.Final("the cluster recovers", func(w *dst.World) error { return c.recovers(w) })
 	h.Final("every member catches up", func(w *dst.World) error { return c.catchesUp(w) })
 	h.Final("the clients' history is linearizable", func(w *dst.World) error {
-		return check.Linearizable(check.KVModel(), c.kv.hist.Ops(), check.Options{}).Err()
+		return check.Linearizable(check.KVModel(), c.resolvedOps(), check.Options{}).Err()
 	})
 	h.Final("acknowledged writes survive", func(w *dst.World) error {
 		applied := map[string]bool{}
@@ -203,6 +204,15 @@ func (c *simCluster) recovers(w *dst.World) error {
 				c.kv.acked[id] = true
 				return nil
 			}
+			if errors.Is(err, ErrLeadershipTransferInProgress) && !bug("transfer-send-stoppable") && w.Now().After(deadline) {
+				// Upstream raft does this (6.14, #696: a transfer goroutine
+				// stuck on a send keeps the flag set, and the re-elected
+				// leader refuses writes). Counted, not failed, unless the
+				// fix is on.
+				c.h.Sometimes("a re-elected leader refused writes for good (6.14)")
+				c.h.Logf("%s refuses writes: %v (6.14)", l.name, err)
+				return nil
+			}
 			if w.Now().After(deadline) {
 				return fmt.Errorf("the probe write through %s failed: %v", l.name, err)
 			}
@@ -251,6 +261,40 @@ func (c *simCluster) catchesUp(w *dst.World) error {
 		}
 		w.Sleep(50 * time.Millisecond)
 	}
+}
+
+// resolvedOps is the clients' history with the unknown writes that never
+// took effect removed. It runs after "every member catches up", so the
+// nodes' applied sets hold everything committed; an unknown write in none
+// of them never happened (the leader that appended it lost it before it
+// committed). Removing it can only make the check stricter: were a write
+// applied and later lost (a bug), a read that saw it would now have no
+// write to explain it. It spares the checker the unknown writes that
+// leadership transfers and slow links make common (each one it must try
+// at every place, and as never happening).
+func (c *simCluster) resolvedOps() []check.Op[check.KVInput, check.KVOutput] {
+	applied := map[string]bool{}
+	for _, nd := range c.nodes {
+		if nd.fsm == nil {
+			continue
+		}
+		for _, id := range nd.fsm.applied {
+			applied[id] = true
+		}
+	}
+	ops := c.kv.hist.Ops()
+	removed := 0
+	ops = slices.DeleteFunc(ops, func(o check.Op[check.KVInput, check.KVOutput]) bool {
+		gone := o.Unknown && o.Input.Op == check.KVPut && !applied[o.Input.Value]
+		if gone {
+			removed++
+		}
+		return gone
+	})
+	if removed > 0 {
+		c.h.Sometimes("an unknown write never took effect")
+	}
+	return ops
 }
 
 // members are the nodes that are part of the cluster at the end: in the

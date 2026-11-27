@@ -562,3 +562,36 @@ edit('raft.go', in_func('func (r *Raft) appendEntriesOn(', 'if a.LeaderCommitInd
 # dstmigrate now maps crypto/rand.Reader to the World's, and no World is
 # in scope there.
 edit('util.go', lambda s: s.replace('crand.Int(dst.CryptoReader(__w), big.NewInt(math.MaxInt64))', 'crand.Int(crand.Reader, big.NewInt(math.MaxInt64))', 1))
+
+# Phase 2 step 3's plant (#696's class): the leadership-transfer flag is
+# never cleared, so the leader refuses writes after its first transfer.
+edit('raft.go', in_func('func (r *Raft) leaderLoop(', '''				r.w.Go(func() {
+					defer r.setLeadershipTransferInProgress(false)''', '''				r.w.Go(func() {
+					defer func() {
+						if !bug("transfer-flag-sticks") {
+							r.setLeadershipTransferInProgress(false)
+						}
+					}()'''))
+
+# Experimental fix (DST.md 6.14, upstream #696): leadershipTransfer's send
+# on the replication goroutine's one-slot back channel isn't in the select
+# with stopCh. An earlier transfer's request left unread fills the slot; the
+# next transfer blocks on the send, and when the leader steps down nothing
+# drains the channel: the transfer goroutine never finishes, the "transfer
+# in progress" flag is never cleared, and the node, re-elected, refuses
+# every write. With the fix the send gives way to stopCh.
+edit('raft.go', in_func('func (r *Raft) leadershipTransfer(id ServerID', '''		repl.triggerDeferErrorCh.Send(err)
+''', '''		if bug("transfer-send-stoppable") {
+			stopped := false
+			dst.Select(r.w,
+				dst.OnSend(repl.triggerDeferErrorCh, err, func() {}),
+				dst.OnRecv(stopCh, func(_ struct{}, _ bool) { stopped = true }),
+			)
+			if stopped {
+				doneCh.Send(nil)
+				return
+			}
+		} else {
+			repl.triggerDeferErrorCh.Send(err)
+		}
+'''))

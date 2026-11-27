@@ -256,6 +256,14 @@ func endCall(call check.Call[check.KVInput, check.KVOutput], in check.KVInput, r
 	case kvNotApplied:
 		call.Fail()
 	default:
+		if in.Op == check.KVGet {
+			// A read whose result never came changes nothing: dropping it
+			// keeps the verdict and spares the checker an operation it
+			// must try at every place (Abandon), which exhausted its budget
+			// once leadership transfers made such reads common.
+			call.Fail()
+			return
+		}
 		call.Abandon()
 	}
 }

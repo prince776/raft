@@ -890,7 +890,11 @@ func (r *Raft) leaderLoop() {
 				// is set to false before calling future.Respond, but that still needs
 				// to be tested and this situation mirrors what callers already had to deal with.
 				r.w.Go(func() {
-					defer r.setLeadershipTransferInProgress(false)
+					defer func() {
+						if !bug("transfer-flag-sticks") {
+							r.setLeadershipTransferInProgress(false)
+						}
+					}()
 					{
 						var sel10 int
 						var sel10v3 error
@@ -1220,7 +1224,19 @@ func (r *Raft) leadershipTransfer(id ServerID, address ServerAddress, repl *foll
 	for atomic.LoadUint64(&repl.nextIndex) <= r.getLastIndex() {
 		err := &deferError{}
 		err.init(r.w)
-		repl.triggerDeferErrorCh.Send(err)
+		if bug("transfer-send-stoppable") {
+			stopped := false
+			dst.Select(r.w,
+				dst.OnSend(repl.triggerDeferErrorCh, err, func() {}),
+				dst.OnRecv(stopCh, func(_ struct{}, _ bool) { stopped = true }),
+			)
+			if stopped {
+				doneCh.Send(nil)
+				return
+			}
+		} else {
+			repl.triggerDeferErrorCh.Send(err)
+		}
 		{
 			var sel14 int
 			var sel14v1 error

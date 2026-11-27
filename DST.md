@@ -457,6 +457,36 @@ seeds examined pass with it; with every known fix on, the term check is
 strict (below). Not yet shown outside the simulation (it needs the
 interleaving; a scripted test is a todo).
 
+### 6.14 A transfer goroutine stuck on a send: the re-elected leader refuses writes for good (liveness; upstream #696)
+
+Found by phase 2 step 3 (leadership transfers in the workload), 3 of 250
+default seeds (Everything 24, Membership 47 and one more), each replaying
+exactly. Everything seed 24: n0 leads term 8 and starts a transfer; the
+target lags, so `leadershipTransfer` asks the replication goroutine to
+catch it up through `repl.triggerDeferErrorCh` (one slot); the transfer
+times out and stops, leaving its request in the slot, unread (the
+replication goroutine is stuck on a slow follower). The next transfer
+blocks on the full slot: that send is outside the `select` with `stopCh`.
+n0 fails to contact a quorum, steps down, wins term 9; nothing drains the
+channel now, so the transfer goroutine never sends on `doneCh`, the
+wrapper goroutine never returns, and its deferred
+`setLeadershipTransferInProgress(false)` never runs. n0 refuses every
+write ("leadership transfer in progress") until it restarts: 265 refusals
+before the run ends.
+
+This is Antithesis's [#696](https://github.com/hashicorp/raft/issues/696)
+(open: "the re-elected leader refuses to service client requests with
+the error message 'leadership transfer in progress'", after a transfer
+interrupted by a step-down), here with its mechanism traced.
+
+Fix (switch `transfer-send-stoppable`): the send selects on `stopCh` too,
+so a stopped transfer always finishes and clears the flag. Both seeds
+examined pass with it; it is in `knownFixes`, and with it on a write
+refused for good fails "the cluster recovers"; without it the refusal is
+counted (`a re-elected leader refused writes for good (6.14)`). Planted
+`transfer-flag-sticks` (the flag never cleared) is caught by "the cluster
+recovers" in half the seeds that draw transfers.
+
 ## 7. The bug benchmark
 
 `dstbench.json`: bugs behind switches (`bug(name)` in `dstbugs*.go`, only
@@ -541,7 +571,7 @@ a gap:
 | Report | Bug | Why we miss it today | Needed |
 |---|---|---|---|
 | [#695](https://github.com/hashicorp/raft/issues/695) | Heartbeats handled on the transport goroutine bump the term concurrently with the leader loop: logs diverge (safety) | **Found in phase 2** (6.13): "terms never go back" catches its alternate manifestation on 13 of 250 default seeds; divergence itself not seen yet | Phase 3-4: exploration for the divergence |
-| [#696](https://github.com/hashicorp/raft/issues/696) | An interrupted leadership transfer leaves "leadership transfer in progress" set: the re-elected leader refuses writes (liveness) | The workload never transfers leadership | Phase 2: leadership transfers in the workload |
+| [#696](https://github.com/hashicorp/raft/issues/696) | An interrupted leadership transfer leaves "leadership transfer in progress" set: the re-elected leader refuses writes (liveness) | **Found in phase 2** (6.14): with transfers in the workload, on 3 of 250 default seeds; root cause and a fix | — |
 | [#697](https://github.com/hashicorp/raft/issues/697) | InstallSnapshot keeps a conflicting log suffix (Figure 13 rule 7): a follower loops on snapshots (liveness) | "The cluster recovers" only needs the leader to commit; "same sequence" accepts a follower stuck on a prefix | Phase 2: every node converges after the faults; phase 1 item 3: snapshots on the simulated disk |
 | [#746](https://github.com/hashicorp/raft/issues/746) | `persistVote` writes term and candidate as two writes; a crash between them lets a stale vote skip the log check (safety) | Needs pre-vote off; our config never turns it off | Phase 1 item 7: draw the configuration per seed (pre-vote on or off); the crash class is the one that found 6.2 |
 
@@ -788,6 +818,24 @@ itself down (6.3, demoted or removed with `ShutdownOnRemove`) is skipped
 and counted, as the operator's agreement check already does: the first
 sweep's three failures (Membership seeds 9, 28, 50) were all that.
 Membership then passes 200 of 200.
+
+### Step 3: leadership transfers (as built)
+
+A per-seed feature, `leadership transfers` (`dst_transfer_test.go`): during
+the faults the leader now and then hands leadership on, to a voter of its
+choosing or raft's. Each transfer must resolve within patience; a stuck
+flag shows as "the cluster recovers" failing. Found 6.14 (#696) at once.
+Scripts that need the leader to stay put opt out (`noTransfers`).
+
+Transfers made the linearizability checker give up (search budget) on
+about 1 in 15 seeds: every write in flight when leadership moves ends
+unknown, and the checker must try each at every place and as never
+happening. A bigger budget only tripped the real-time watchdog. Two
+sound reductions fixed it: a read whose result never came is recorded as
+having no effect (it changes nothing), and, since the check runs after
+every member caught up, an unknown write that no node applied is removed
+(it never took effect; removing it can only make the check stricter).
+Seeds that took 10s and gave up now pass in 2–7s.
 
 ## 11. How to run
 

@@ -39,6 +39,9 @@ func TestDSTChecksCatchBugs(t *testing.T) {
 		{"vote-ignores-log", []string{"leaders hold every committed entry"}, dsttest.Faults{Crash: true, Disk: true, Partition: true, Network: true}, 5},
 		// Step 2: a follower that never applies is seen only here.
 		{"follower-ignores-commit", []string{"every member catches up"}, dsttest.Faults{Crash: true}, 3},
+		// Step 3: a transfer flag that sticks (#696's class) leaves a leader
+		// refusing writes; seeds with "leadership transfers" on.
+		{"transfer-flag-sticks,transfer-send-stoppable", []string{"the cluster recovers"}, dsttest.Faults{Crash: true, Partition: true}, 3},
 		// The term check is strict only with 6.13's fix on.
 		{"forget-term-on-restart,heartbeat-on-main-thread", []string{"terms never go back"}, dsttest.Faults{Crash: true, Disk: true}, 3},
 		{"accept-stale-leader", []string{"leaders hold every committed entry", "the clients' history is linearizable", "acknowledged writes survive", "the nodes applied the same sequence"},
@@ -85,7 +88,7 @@ func TestDSTChecksCatchBugs(t *testing.T) {
 // refuse a candidate missing the writes), which is why the swarm never
 // finds the bug.
 func quorumScript(h *dsttest.Harness) {
-	nodes := dstCluster(h, 4)
+	nodes := newCluster(h, clusterSpec{voters: 4, noTransfers: true}).nodes
 	h.Go(func(w *dst.World) {
 		var l *dstNode
 		for l == nil {
@@ -165,7 +168,7 @@ func TestDSTQuorumOffByOneScripted(t *testing.T) {
 // down. Plain Raft has no such check: C grants D its vote (D's log is
 // ahead), D wins, and catches C up.
 func staleConfigScript(h *dsttest.Harness) {
-	c := newCluster(h, clusterSpec{voters: 3, spares: 1})
+	c := newCluster(h, clusterSpec{voters: 3, spares: 1, noTransfers: true})
 	h.Go(func(w *dst.World) {
 		var a *dstNode
 		for a == nil {
@@ -319,7 +322,7 @@ func TestDSTDiskErrorsFixed(t *testing.T) {
 }
 
 // knownFixes are the proposed fixes for the raft bugs found so far.
-const knownFixes = "candidate-check-unless-ahead,bootstrap-log-first,snapshot-boundary-fix,snapshot-fallback-needs-log,heartbeat-on-main-thread"
+const knownFixes = "candidate-check-unless-ahead,bootstrap-log-first,snapshot-boundary-fix,snapshot-fallback-needs-log,heartbeat-on-main-thread,transfer-send-stoppable"
 
 // TestDSTMembershipFixed: the membership sweep with servers lost for good
 // and replaced, with the proposed fixes on. Correct raft stalls on some

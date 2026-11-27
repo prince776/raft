@@ -40,6 +40,9 @@ type clusterSpec struct {
 	// drawConfig draws raft's configuration per seed (raftKnobs), the
 	// same on every node; otherwise it is dstConfig's, fixed.
 	drawConfig bool
+	// noTransfers: no leadership transfers even when the seed draws them
+	// (scripts that need the leader to stay put).
+	noTransfers bool
 	// oneSnapshot keeps one snapshot (FileSnapshotStore's retain), so a
 	// node never falls back to an older one at startup (DST.md 6.12).
 	oneSnapshot bool
@@ -134,6 +137,9 @@ type simCluster struct {
 	op    *operator  // nil unless spec.operator
 	knobs *raftKnobs // the drawn configuration (nil unless spec.drawConfig)
 	inv   *invariants
+	// transfer: the leader hands leadership on now and then (a per-seed
+	// feature, dst_transfer_test.go).
+	transfer bool
 }
 
 // dstNode is one machine. Its log and stable store live in a file on its
@@ -210,6 +216,7 @@ func newCluster(h *dsttest.Harness, spec clusterSpec) *simCluster {
 		}
 	}
 	c.kv = newKVWorkload(c)
+	c.transfer = h.Feature("leadership transfers") && !spec.noTransfers
 	if spec.operator {
 		c.op = newOperator(c, initial)
 	}
@@ -334,6 +341,9 @@ func (c *simCluster) boot(nd *dstNode, w *dst.World, initial []Server) {
 	nd.raft = r
 	if c.op != nil {
 		w.Go(func() { c.op.run(w, nd) })
+	}
+	if c.transfer {
+		w.Go(func() { c.transfers(w, nd) })
 	}
 	if c.spec.clients > 0 {
 		kc := &kvClient{h: h, w: w, r: r, fsm: nd.fsm, naive: c.spec.scenario.naiveReadIndex}
