@@ -1,0 +1,98 @@
+{
+  "package": ".",
+  "tags": "dstbugs",
+  "env": "DSTBUG",
+  "baseline": [
+    "TestDSTSmoke",
+    "TestDSTCrashes",
+    "TestDSTPartitions",
+    "TestDSTEverything",
+    "TestDSTFourNodes"
+  ],
+  "bugs": [
+    {
+      "name": "quorum-off-by-one",
+      "tests": [
+        "TestDSTCrashes",
+        "TestDSTPartitions",
+        "TestDSTEverything",
+        "TestDSTFourNodes"
+      ],
+      "note": "Upstream 163a55f: the commit quorum is the median of the sorted match indexes rounded up, so an even cluster commits on half its nodes."
+    },
+    {
+      "name": "vote-twice",
+      "tests": [
+        "TestDSTCrashes",
+        "TestDSTPartitions",
+        "TestDSTEverything",
+        "TestDSTFourNodes"
+      ],
+      "note": "A node grants a second vote in a term it already voted in (the duplicate-vote check is skipped)."
+    },
+    {
+      "name": "vote-ignores-log",
+      "tests": [
+        "TestDSTCrashes",
+        "TestDSTPartitions",
+        "TestDSTEverything",
+        "TestDSTFourNodes"
+      ],
+      "note": "The election restriction is skipped (Raft \u00a75.4.1): votes and pre-votes go to candidates whose logs are behind."
+    },
+    {
+      "name": "accept-stale-leader",
+      "tests": [
+        "TestDSTCrashes",
+        "TestDSTPartitions",
+        "TestDSTEverything",
+        "TestDSTFourNodes"
+      ],
+      "note": "AppendEntries from an older term is accepted (the receiver steps down and takes its entries)."
+    },
+    {
+      "name": "skip-prev-log-term",
+      "tests": [
+        "TestDSTCrashes",
+        "TestDSTPartitions",
+        "TestDSTEverything",
+        "TestDSTFourNodes"
+      ],
+      "note": "AppendEntries' consistency check compares only the previous index, not its term (log matching, \u00a75.3)."
+    },
+    {
+      "name": "readindex-without-barrier",
+      "tests": [
+        "TestDSTCrashes",
+        "TestDSTPartitions",
+        "TestDSTEverything",
+        "TestDSTFourNodes"
+      ],
+      "reached": "a ReadIndex read",
+      "note": "Client: ReadIndex reads served before the leader has committed an entry in its term (\u00a78)."
+    },
+    {
+      "name": "commit-previous-term",
+      "tests": [
+        "TestDSTCrashes",
+        "TestDSTPartitions",
+        "TestDSTEverything",
+        "TestDSTFourNodes"
+      ],
+      "held_out": true,
+      "note": "The leader commits an entry of an earlier term by counting replicas (Raft Figure 8)."
+    },
+    {
+      "name": "compact-past-snapshot",
+      "tests": [
+        "TestDSTCrashes",
+        "TestDSTPartitions",
+        "TestDSTEverything",
+        "TestDSTFourNodes"
+      ],
+      "reached": "a snapshot was persisted",
+      "held_out": true,
+      "note": "Log compaction deletes entries after the snapshot's last index."
+    }
+  ]
+}

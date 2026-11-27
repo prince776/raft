@@ -264,6 +264,9 @@ func (r *Raft) compactLogsWithTrailing(snapIdx uint64, lastLogIdx uint64, traili
 	// at least `TrailingLogs` entries, but does not allow logs
 	// after the snapshot to be removed.
 	maxLog := min(snapIdx, lastLogIdx-trailingLogs)
+	if bug("compact-past-snapshot") {
+		maxLog = lastLogIdx - trailingLogs // deletes entries the snapshot doesn't hold
+	}
 
 	if minLog > maxLog {
 		r.logger.Info("no logs to truncate")

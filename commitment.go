@@ -97,8 +97,11 @@ func (c *commitment) recalculate() {
 	}
 	sort.Sort(uint64Slice(matched))
 	quorumMatchIndex := matched[(len(matched)-1)/2]
+	if bug("quorum-off-by-one") {
+		quorumMatchIndex = matched[len(matched)/2] // before 163a55f: half of an even cluster
+	}
 
-	if quorumMatchIndex > c.commitIndex && quorumMatchIndex >= c.startIndex {
+	if quorumMatchIndex > c.commitIndex && (quorumMatchIndex >= c.startIndex || bug("commit-previous-term")) {
 		c.commitIndex = quorumMatchIndex
 		asyncNotifyCh(c.commitCh)
 	}

@@ -341,7 +341,7 @@ func (c *kvClient) op(id, key string) {
 func (c *kvClient) readIndex(key string) {
 	h, w, r := c.h, c.w, c.r
 	term := r.getCurrentTerm()
-	if !c.naive && c.barrierTerm != term {
+	if !c.naive && !bug("readindex-without-barrier") && c.barrierTerm != term {
 		if r.Barrier(500*time.Millisecond).Error() != nil || r.getCurrentTerm() != term {
 			return
 		}
@@ -395,6 +395,13 @@ func TestDSTPartitions(t *testing.T) {
 func TestDSTEverything(t *testing.T) {
 	dsttest.Run(t, dstOpts(dsttest.Faults{Crash: true, Disk: true, Partition: true, Network: true, Pause: true}),
 		func(h *dsttest.Harness) { dstCluster(h, 5) })
+}
+
+// TestDSTFourNodes: an even-sized cluster (its quorum is 3 of 4, not
+// half), with crashes and partitions.
+func TestDSTFourNodes(t *testing.T) {
+	dsttest.Run(t, dstOpts(dsttest.Faults{Crash: true, Disk: true, Partition: true, Network: true}),
+		func(h *dsttest.Harness) { dstCluster(h, 4) })
 }
 
 // The store's guarantees matter: with fsync skipped (a store that returns

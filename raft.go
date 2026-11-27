@@ -1729,7 +1729,7 @@ func (r *Raft) appendEntries(rpc RPC, a *AppendEntriesRequest) {
 	}()
 
 	// Ignore an older term
-	if a.Term < r.getCurrentTerm() {
+	if a.Term < r.getCurrentTerm() && !bug("accept-stale-leader") {
 		return
 	}
 
@@ -1768,7 +1768,7 @@ func (r *Raft) appendEntries(rpc RPC, a *AppendEntriesRequest) {
 			prevLogTerm = prevLog.Term
 		}
 
-		if a.PrevLogTerm != prevLogTerm {
+		if a.PrevLogTerm != prevLogTerm && !bug("skip-prev-log-term") {
 			r.logger.Warn("previous log term mis-match",
 				"ours", prevLogTerm,
 				"remote", a.PrevLogTerm)
@@ -1976,7 +1976,7 @@ func (r *Raft) requestVote(rpc RPC, req *RequestVoteRequest) {
 	}
 
 	// Check if we've voted in this election before
-	if lastVoteTerm == req.Term && lastVoteCandBytes != nil {
+	if lastVoteTerm == req.Term && lastVoteCandBytes != nil && !bug("vote-twice") {
 		r.logger.Info("duplicate requestVote for same term", "term", req.Term)
 		if bytes.Equal(lastVoteCandBytes, candidateBytes) {
 			r.logger.Warn("duplicate requestVote from", "candidate", candidate)
@@ -1987,7 +1987,7 @@ func (r *Raft) requestVote(rpc RPC, req *RequestVoteRequest) {
 
 	// Reject if their term is older
 	lastIdx, lastTerm := r.getLastEntry()
-	if lastTerm > req.LastLogTerm {
+	if lastTerm > req.LastLogTerm && !bug("vote-ignores-log") {
 		r.logger.Warn("rejecting vote request since our last term is greater",
 			"candidate", candidate,
 			"last-term", lastTerm,
@@ -1995,7 +1995,7 @@ func (r *Raft) requestVote(rpc RPC, req *RequestVoteRequest) {
 		return
 	}
 
-	if lastTerm == req.LastLogTerm && lastIdx > req.LastLogIndex {
+	if lastTerm == req.LastLogTerm && lastIdx > req.LastLogIndex && !bug("vote-ignores-log") {
 		r.logger.Warn("rejecting vote request since our last index is greater",
 			"candidate", candidate,
 			"last-index", lastIdx,
@@ -2069,7 +2069,7 @@ func (r *Raft) requestPreVote(rpc RPC, req *RequestPreVoteRequest) {
 
 	// Reject if their term is older
 	lastIdx, lastTerm := r.getLastEntry()
-	if lastTerm > req.LastLogTerm {
+	if lastTerm > req.LastLogTerm && !bug("vote-ignores-log") {
 		r.logger.Warn("rejecting pre-vote request since our last term is greater",
 			"candidate", candidate,
 			"last-term", lastTerm,
@@ -2077,7 +2077,7 @@ func (r *Raft) requestPreVote(rpc RPC, req *RequestPreVoteRequest) {
 		return
 	}
 
-	if lastTerm == req.LastLogTerm && lastIdx > req.LastLogIndex {
+	if lastTerm == req.LastLogTerm && lastIdx > req.LastLogIndex && !bug("vote-ignores-log") {
 		r.logger.Warn("rejecting pre-vote request since our last index is greater",
 			"candidate", candidate,
 			"last-index", lastIdx,
