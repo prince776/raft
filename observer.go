@@ -126,7 +126,7 @@ func (r *Raft) observe(o interface{}) {
 	// registration / deregistration of observers.
 	r.observersLock.RLock()
 	defer r.observersLock.RUnlock()
-	for _, or := range r.observers {
+	for _, or := range mapValues(r.w, r.observers) {
 		// It's wasteful to do this in the loop, but for the common case
 		// where there are no observers we won't create any objects.
 		ob := Observation{Raft: r, Data: o}

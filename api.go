@@ -230,6 +230,9 @@ type Raft struct {
 	// RestoreCommittedLogs is used to enable restore committed logs mode
 	// restore committed logs mode is disabled if set to false.
 	RestoreCommittedLogs bool
+
+	// verifySeq numbers verify futures, to order them (dst_maporder.go).
+	verifySeq atomic.Uint64
 }
 
 // BootstrapCluster initializes a server's storage with the given cluster
@@ -966,7 +969,7 @@ func (r *Raft) Barrier(timeout time.Duration) Future {
 // leadership.
 func (r *Raft) VerifyLeader() Future {
 	metrics.IncrCounter([]string{"raft", "verify_leader"}, 1)
-	verifyFuture := &verifyFuture{}
+	verifyFuture := &verifyFuture{seq: r.verifySeq.Add(1)}
 	verifyFuture.init(r.w)
 	{
 		var sel4 int

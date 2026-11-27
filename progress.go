@@ -37,7 +37,7 @@ func startSnapshotRestoreMonitor(
 	size int64,
 	networkTransfer bool,
 ) *snapshotRestoreMonitor {
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := dst.WithCancel(w, context.Background())
 
 	m := &snapshotRestoreMonitor{
 		logger:          logger,

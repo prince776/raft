@@ -363,7 +363,7 @@ func (c *cluster) WaitEventChan(ctx context.Context, filter FilterFn) dst.Chan[s
 // observations. Setting timeout to 0 means that it will wait forever until a
 // non-filtered observation is made or a test failure is signaled.
 func (c *cluster) WaitEvent(filter FilterFn, timeout time.Duration) {
-	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	ctx, cancel := dst.WithTimeout(c.w, context.Background(), timeout)
 	defer cancel()
 	eventCh := c.WaitEventChan(ctx, filter)
 	{
@@ -389,7 +389,7 @@ func (c *cluster) WaitForReplication(fsmLength int) {
 
 CHECK:
 	for {
-		ctx, cancel := context.WithTimeout(context.Background(), c.conf.CommitTimeout)
+		ctx, cancel := dst.WithTimeout(c.w, context.Background(), c.conf.CommitTimeout)
 		defer cancel()
 		ch := c.WaitEventChan(ctx, nil)
 		{
@@ -497,7 +497,7 @@ func (c *cluster) GetInState(s RaftState) []*Raft {
 			}
 		}
 
-		ctx, cancel := context.WithCancel(context.Background())
+		ctx, cancel := dst.WithCancel(c.w, context.Background())
 		defer cancel()
 		eventCh := c.WaitEventChan(ctx, filter)
 		{

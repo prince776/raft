@@ -544,7 +544,7 @@ func TestRaft_PreVote_LeaderSpam(t *testing.T) {
 
 	// spam all the followers with pre-vote requests from the leader
 	// those requests should be granted as long as the leader haven't changed.
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := dst.WithCancel(theRealWorld(), context.Background())
 	defer cancel()
 	theRealWorld().Go(func() {
 		for {

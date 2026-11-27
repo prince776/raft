@@ -527,7 +527,7 @@ func TestNetworkTransport_AppendEntriesPipeline_MaxRPCsInFlight(t *testing.T) {
 			args := makeAppendRPC()
 			resp := makeAppendRPCResponse()
 
-			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			ctx, cancel := dst.WithTimeout(theRealWorld(), context.Background(), 5*time.Second)
 			defer cancel()
 
 			// Transport 2 makes outbound request

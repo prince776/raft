@@ -629,7 +629,7 @@ func (r *Raft) runLeader() {
 		r.setLastContact()
 
 		// Stop replication
-		for _, p := range r.leaderState.replState {
+		for _, p := range mapValues(r.w, r.leaderState.replState) {
 			p.stopCh.Close()
 		}
 
@@ -639,7 +639,7 @@ func (r *Raft) runLeader() {
 		}
 
 		// Respond to any pending verify requests
-		for future := range r.leaderState.notify {
+		for _, future := range futureOrder(r.w, r.leaderState.notify) {
 			future.respond(ErrLeadershipLost)
 		}
 
@@ -766,7 +766,8 @@ func (r *Raft) startStopReplication() {
 	}
 
 	// Stop replication goroutines that need stopping
-	for serverID, repl := range r.leaderState.replState {
+	for _, serverID := range mapOrder(r.w, r.leaderState.replState) {
+		repl := r.leaderState.replState[serverID]
 		if inConfig[serverID] {
 			continue
 		}
@@ -1047,7 +1048,7 @@ func (r *Raft) leaderLoop() {
 					r.logger.Warn("new leader elected, stepping down")
 					r.setState(Follower)
 					delete(r.leaderState.notify, v)
-					for _, repl := range r.leaderState.replState {
+					for _, repl := range mapValues(r.w, r.leaderState.replState) {
 						repl.cleanNotify(v)
 					}
 					v.respond(ErrNotLeader)
@@ -1055,7 +1056,7 @@ func (r *Raft) leaderLoop() {
 				} else {
 					// Quorum of members agree, we are still leader
 					delete(r.leaderState.notify, v)
-					for _, repl := range r.leaderState.replState {
+					for _, repl := range mapValues(r.w, r.leaderState.replState) {
 						repl.cleanNotify(v)
 					}
 					v.respond(nil)
@@ -1155,7 +1156,7 @@ func (r *Raft) leaderLoop() {
 				lease = r.w.After(checkInterval)
 
 			case 12:
-				for _, repl := range r.leaderState.replState {
+				for _, repl := range mapValues(r.w, r.leaderState.replState) {
 					asyncNotifyCh(repl.notifyCh)
 				}
 
@@ -1189,7 +1190,7 @@ func (r *Raft) verifyLeader(v *verifyFuture) {
 	r.leaderState.notify[v] = struct{}{}
 
 	// Trigger immediate heartbeats
-	for _, repl := range r.leaderState.replState {
+	for _, repl := range mapValues(r.w, r.leaderState.replState) {
 		repl.notifyLock.Lock()
 		repl.notify[v] = struct{}{}
 		repl.notifyLock.Unlock()
@@ -1520,7 +1521,7 @@ func (r *Raft) dispatchLogs(applyLogs []*logFuture) {
 	r.setLastLog(lastIndex, term)
 
 	// Notify the replicators of the new log
-	for _, f := range r.leaderState.replState {
+	for _, f := range mapValues(r.w, r.leaderState.replState) {
 		asyncNotifyCh(f.triggerCh)
 	}
 }

@@ -294,7 +294,7 @@ func NewNetworkTransportWithLogger(
 // setupStreamContext is used to create a new stream context. This should be
 // called with the stream lock held.
 func (n *NetworkTransport) setupStreamContext() {
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := dst.WithCancel(n.w, context.Background())
 	n.streamCtx = ctx
 	n.streamCancel = cancel
 }
@@ -322,7 +322,8 @@ func (n *NetworkTransport) CloseStreams() {
 
 	// Close all the connections in the connection pool and then remove their
 	// entry.
-	for k, e := range n.connPool {
+	for _, k := range mapOrder(n.w, n.connPool) {
+		e := n.connPool[k]
 		for _, conn := range e {
 			_ = conn.Release()
 		}

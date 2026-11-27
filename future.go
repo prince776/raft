@@ -256,6 +256,8 @@ type verifyFuture struct {
 	quorumSize int
 	votes      int
 	voteLock   dst.Mutex
+
+	seq uint64 // creation order (dst_maporder.go)
 }
 
 // leadershipTransferFuture is used to track the progress of a leadership
