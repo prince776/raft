@@ -3501,3 +3501,155 @@ func TestRaft_PreVote_ShouldRejectNonLeader(t *testing.T) {
 		t.Fatalf("expected pre-vote to not be granted, but it was granted, %+v", resp)
 	}
 }
+
+// snapshotBoundaryCluster makes a 3-server cluster with TrailingLogs 0,
+// applies n entries, and returns the leader, a follower, and an inmem
+// transport connected to the follower (to send it RPCs directly).
+func snapshotBoundaryCluster(t *testing.T, n int) (*cluster, *Raft, *Raft, *InmemTransport) {
+	conf := inmemConfig(t)
+	conf.TrailingLogs = 0
+	c := MakeCluster(3, t, conf)
+	leader := c.Leader()
+	for i := 0; i < n; i++ {
+		if err := leader.Apply([]byte(fmt.Sprintf("test%d", i)), 0).Error(); err != nil {
+			t.Fatalf("apply: %v", err)
+		}
+	}
+	c.WaitForReplication(n)
+	follower := c.Followers()[0]
+	_, trans := NewInmemTransport("")
+	trans.Connect(follower.localAddr, c.trans[c.IndexOf(follower)])
+	return c, leader, follower, trans
+}
+
+// TestRaft_AppendEntries_PrevLogAtSnapshotBoundary checks that a follower
+// accepts an AppendEntries whose previous entry is at or below its own
+// snapshot, even when its log no longer holds that entry. With
+// TrailingLogs 0 a snapshot removes every entry it covers, so a follower
+// that took a snapshot at S and then received S+1 holds only S+1: an
+// AppendEntries with PrevLogEntry S (or below) used to fail the lookup,
+// making the leader fall back to sending a snapshot.
+func TestRaft_AppendEntries_PrevLogAtSnapshotBoundary(t *testing.T) {
+	c, leader, follower, trans := snapshotBoundaryCluster(t, 10)
+	defer c.Close()
+	if err := follower.Snapshot().Error(); err != nil {
+		t.Fatalf("snapshot: %v", err)
+	}
+	snapIdx, snapTerm := follower.getLastSnapshot()
+	if err := leader.Apply([]byte("after"), 0).Error(); err != nil {
+		t.Fatalf("apply: %v", err)
+	}
+	c.WaitForReplication(11)
+	if last, _ := follower.getLastLog(); last <= snapIdx {
+		t.Fatalf("test setup: follower's last log %d isn't past its snapshot %d", last, snapIdx)
+	}
+	if first, _ := follower.logs.FirstIndex(); first <= snapIdx {
+		t.Fatalf("test setup: follower still holds entry %d (first index %d)", snapIdx, first)
+	}
+
+	var entries []*Log
+	for idx := snapIdx; idx <= snapIdx+1; idx++ {
+		var l Log
+		if err := leader.logs.GetLog(idx, &l); err != nil {
+			t.Fatalf("leader's log %d: %v", idx, err)
+		}
+		entries = append(entries, &l)
+	}
+	for _, tc := range []struct {
+		name    string
+		prev    uint64
+		entries []*Log
+	}{
+		{"previous entry is the snapshot's last", snapIdx, nil},
+		{"previous entry inside the snapshot, with entries crossing it", snapIdx - 1, entries},
+	} {
+		var prevTerm uint64
+		if tc.prev == snapIdx {
+			prevTerm = snapTerm
+		} else {
+			var l Log
+			if err := leader.logs.GetLog(tc.prev, &l); err != nil {
+				t.Fatalf("leader's log %d: %v", tc.prev, err)
+			}
+			prevTerm = l.Term
+		}
+		req := AppendEntriesRequest{
+			RPCHeader:         leader.getRPCHeader(),
+			Term:              leader.getCurrentTerm(),
+			PrevLogEntry:      tc.prev,
+			PrevLogTerm:       prevTerm,
+			Entries:           tc.entries,
+			LeaderCommitIndex: leader.getCommitIndex(),
+		}
+		var resp AppendEntriesResponse
+		if err := trans.AppendEntries(follower.localID, follower.localAddr, &req, &resp); err != nil {
+			t.Fatalf("%s: AppendEntries: %v", tc.name, err)
+		}
+		if !resp.Success {
+			t.Errorf("%s: rejected (follower snapshot %d, first log %d)", tc.name, snapIdx, func() uint64 { i, _ := follower.logs.FirstIndex(); return i }())
+		}
+	}
+}
+
+// TestRaft_InstallSnapshot_IgnoresSnapshotOlderThanApplied checks that a
+// follower doesn't install a snapshot that ends before what it has already
+// applied. Installing it moved the follower's state machine back in time,
+// and, with its own snapshot having compacted the entries after it, the
+// follower then could neither replay them nor accept the leader's entries.
+func TestRaft_InstallSnapshot_IgnoresSnapshotOlderThanApplied(t *testing.T) {
+	c, leader, follower, trans := snapshotBoundaryCluster(t, 10)
+	defer c.Close()
+	if err := leader.Snapshot().Error(); err != nil {
+		t.Fatalf("leader snapshot: %v", err)
+	}
+	for i := 10; i < 20; i++ {
+		if err := leader.Apply([]byte(fmt.Sprintf("test%d", i)), 0).Error(); err != nil {
+			t.Fatalf("apply: %v", err)
+		}
+	}
+	c.WaitForReplication(20)
+	appliedBefore := follower.getLastApplied()
+	fsm := getMockFSM(c.fsms[c.IndexOf(follower)])
+	fsmBefore := len(fsm.Logs())
+
+	snaps, err := leader.snapshots.List()
+	if err != nil || len(snaps) == 0 {
+		t.Fatalf("leader has no snapshot: %v", err)
+	}
+	meta, rc, err := leader.snapshots.Open(snaps[0].ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rc.Close()
+	if meta.Index >= appliedBefore {
+		t.Fatalf("test setup: snapshot %d isn't older than the follower's applied %d", meta.Index, appliedBefore)
+	}
+	req := InstallSnapshotRequest{
+		RPCHeader:          leader.getRPCHeader(),
+		SnapshotVersion:    meta.Version,
+		Term:               leader.getCurrentTerm(),
+		LastLogIndex:       meta.Index,
+		LastLogTerm:        meta.Term,
+		Configuration:      EncodeConfiguration(meta.Configuration),
+		ConfigurationIndex: meta.ConfigurationIndex,
+		Size:               meta.Size,
+	}
+	var resp InstallSnapshotResponse
+	if err := trans.InstallSnapshot(follower.localID, follower.localAddr, &req, &resp, rc); err != nil {
+		t.Fatalf("InstallSnapshot: %v", err)
+	}
+	if !resp.Success {
+		t.Errorf("an old snapshot should be acknowledged")
+	}
+	if got := follower.getLastApplied(); got < appliedBefore {
+		t.Errorf("applied index went back from %d to %d", appliedBefore, got)
+	}
+	if got := len(fsm.Logs()); got < fsmBefore {
+		t.Errorf("the state machine went back from %d to %d entries", fsmBefore, got)
+	}
+	// And the follower keeps replicating normally.
+	if err := leader.Apply([]byte("after"), 0).Error(); err != nil {
+		t.Fatalf("apply: %v", err)
+	}
+	c.WaitForReplication(21)
+}

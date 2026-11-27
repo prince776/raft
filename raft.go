@@ -1495,8 +1495,15 @@ func (r *Raft) appendEntries(rpc RPC, a *AppendEntriesRequest) {
 		lastIdx, lastTerm := r.getLastEntry()
 
 		var prevLogTerm uint64
+		snapIdx, _ := r.getLastSnapshot()
 		if a.PrevLogEntry == lastIdx {
 			prevLogTerm = lastTerm
+		} else if a.PrevLogEntry <= snapIdx {
+			// Entries up to our snapshot are committed, and a leader holds
+			// every committed entry, so the leader's entry is ours. The log
+			// may no longer hold it (compaction keeps only TrailingLogs
+			// entries), so don't look it up.
+			prevLogTerm = a.PrevLogTerm
 		} else {
 			var prevLog Log
 			if err := r.logs.GetLog(a.PrevLogEntry, &prevLog); err != nil {
@@ -1525,8 +1532,12 @@ func (r *Raft) appendEntries(rpc RPC, a *AppendEntriesRequest) {
 
 		// Delete any conflicting entries, skip any duplicates
 		lastLogIdx, _ := r.getLastLog()
+		snapshotIdx, _ := r.getLastSnapshot()
 		var newEntries []*Log
 		for i, entry := range a.Entries {
+			if entry.Index <= snapshotIdx {
+				continue // committed, and already in our snapshot
+			}
 			if entry.Index > lastLogIdx {
 				newEntries = a.Entries[i:]
 				break
@@ -1891,6 +1902,18 @@ func (r *Raft) installSnapshot(rpc RPC, req *InstallSnapshotRequest) {
 		}
 		reqConfigurationIndex = req.LastLogIndex
 	}
+
+	// A valid snapshot that ends at or before what we have applied holds nothing
+	// new. Installing it would move the state machine back in time, and
+	// the entries after it may already be compacted away. Acknowledge it,
+	// so the leader carries on from its end.
+	if req.LastLogIndex <= r.getLastApplied() {
+		r.logger.Info("ignoring snapshot older than our applied state",
+			"snapshot-index", req.LastLogIndex, "applied-index", r.getLastApplied())
+		resp.Success = true
+		return
+	}
+
 	version := getSnapshotVersion(r.protocolVersion)
 	sink, err := r.snapshots.Create(version, req.LastLogIndex, req.LastLogTerm,
 		reqConfiguration, reqConfigurationIndex, r.trans)
