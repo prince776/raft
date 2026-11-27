@@ -2,11 +2,20 @@ package raft
 
 // Deterministic simulation tests (go-dst-kit): a cluster of real raft
 // nodes, each on its own simulated machine, talking through the real
-// NetworkTransport over the simulated network, with crashes, partitions
-// and pauses from the swarm.
+// NetworkTransport over the simulated network, keeping their logs in a
+// file on a crash-prone simulated disk (dstLogStore), with crashes,
+// partitions and pauses from the swarm.
+//
+// The workload is a key-value service on raft, as an application embeds
+// it: each node runs a client that, while its node leads, writes through
+// the log and reads either through the log or with the ReadIndex recipe
+// (VerifyLeader, then wait for the commit index). Checked: at most one
+// leader per term; the clients' history is linearizable; acknowledged
+// writes survive; every node applied a prefix of one sequence.
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"maps"
@@ -15,50 +24,89 @@ import (
 	"time"
 
 	"github.com/hashicorp/go-hclog"
+	"github.com/prince776/go-dst-kit/check"
 	"github.com/prince776/go-dst-kit/dst"
 	"github.com/prince776/go-dst-kit/dsttest"
 )
 
-// seqFSM applies "w<i>" commands in order and records them.
-type seqFSM struct {
+// kvCmd is a command in the log.
+type kvCmd struct {
+	ID    string // unique per operation
+	Get   bool
+	Key   string
+	Value string
+}
+
+// kvFSM applies kvCmds: a map, and the sequence of commands applied.
+type kvFSM struct {
 	mu      dst.Mutex
-	applied []string
+	kv      map[string]string
+	applied []string // command IDs, in order
 	h       *dsttest.Harness
 }
 
-func (f *seqFSM) Apply(l *Log) interface{} {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	f.applied = append(f.applied, string(l.Data))
-	return len(f.applied)
+type kvResult struct {
+	Value string
+	Found bool
 }
 
-func (f *seqFSM) Snapshot() (FSMSnapshot, error) {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	return &seqSnapshot{applied: append([]string(nil), f.applied...), h: f.h}, nil
-}
-
-func (f *seqFSM) Restore(r io.ReadCloser) error {
-	defer r.Close()
-	var got []string
-	if err := json.NewDecoder(r).Decode(&got); err != nil {
+func (f *kvFSM) Apply(l *Log) interface{} {
+	var c kvCmd
+	if err := json.Unmarshal(l.Data, &c); err != nil {
 		return err
 	}
 	f.mu.Lock()
-	f.applied = got
+	defer f.mu.Unlock()
+	f.applied = append(f.applied, c.ID)
+	if c.Get {
+		v, ok := f.kv[c.Key]
+		return kvResult{v, ok}
+	}
+	f.kv[c.Key] = c.Value
+	return kvResult{}
+}
+
+func (f *kvFSM) read(key string) kvResult {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	v, ok := f.kv[key]
+	return kvResult{v, ok}
+}
+
+type kvState struct {
+	KV      map[string]string
+	Applied []string
+}
+
+func (f *kvFSM) Snapshot() (FSMSnapshot, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return &kvSnapshot{st: kvState{KV: maps.Clone(f.kv), Applied: slices.Clone(f.applied)}, h: f.h}, nil
+}
+
+func (f *kvFSM) Restore(r io.ReadCloser) error {
+	defer r.Close()
+	var st kvState
+	if err := json.NewDecoder(r).Decode(&st); err != nil {
+		return err
+	}
+	f.mu.Lock()
+	f.kv, f.applied = st.KV, st.Applied
+	if f.kv == nil {
+		f.kv = map[string]string{}
+	}
 	f.mu.Unlock()
 	f.h.Sometimes("an FSM was restored from a snapshot")
 	return nil
 }
 
-type seqSnapshot struct {
-	applied []string
-	h       *dsttest.Harness
+type kvSnapshot struct {
+	st kvState
+	h  *dsttest.Harness
 }
 
-func (s *seqSnapshot) Persist(sink SnapshotSink) error {
-	if err := json.NewEncoder(sink).Encode(s.applied); err != nil {
+func (s *kvSnapshot) Persist(sink SnapshotSink) error {
+	if err := json.NewEncoder(sink).Encode(s.st); err != nil {
 		sink.Cancel()
 		return err
 	}
@@ -66,17 +114,17 @@ func (s *seqSnapshot) Persist(sink SnapshotSink) error {
 	return sink.Close()
 }
 
-func (s *seqSnapshot) Release() {}
+func (s *kvSnapshot) Release() {}
 
 // dstNode is one server. Its log and stable store live in a file on its
 // machine's simulated disk (dstLogStore: what a crash keeps is what was
-// fsynced); its snapshots outlive crashes whole (for now); its raft and FSM
-// are rebuilt at each boot.
+// fsynced); its snapshots outlive crashes whole (for now); its raft, FSM
+// and client are rebuilt at each boot.
 type dstNode struct {
 	name  string
 	logs  *dstLogStore
 	snaps *InmemSnapshotStore
-	fsm   *seqFSM
+	fsm   *kvFSM
 	raft  *Raft
 	m     *dsttest.Machine
 }
@@ -97,8 +145,10 @@ func dstConfig(w *dst.World, name string) *Config {
 	return c
 }
 
-// dstScenario switches a store's weaker modes on (see dstLogStore).
-type dstScenario struct{ noSync, splitBatches bool }
+// dstScenario switches weaker modes on: the store's (see dstLogStore), and
+// naiveReadIndex, a client that serves ReadIndex reads without first
+// committing an entry in the leader's term.
+type dstScenario struct{ noSync, splitBatches, naiveReadIndex bool }
 
 func dstCluster(h *dsttest.Harness, n int) []*dstNode { return dstClusterWith(h, n, dstScenario{}) }
 
@@ -110,8 +160,10 @@ func dstClusterWith(h *dsttest.Harness, n int, sc dstScenario) []*dstNode {
 		nodes[i] = &dstNode{name: name, snaps: NewInmemSnapshotStore()}
 		servers = append(servers, Server{ID: ServerID(name), Address: ServerAddress(name + ":7000")})
 	}
-	seq := 0
-	acked := map[string]bool{} // writes whose Apply succeeded
+	hist := check.NewHistory[check.KVInput, check.KVOutput](h.World())
+	keys := []string{"a", "b", "c"}
+	opID, client := 0, 0
+	acked := map[string]bool{} // IDs of writes whose Apply succeeded
 	for _, nd := range nodes {
 		nd.m = h.Machine(nd.name, func(w *dst.World) {
 			nd.snaps.w = w
@@ -120,8 +172,7 @@ func dstClusterWith(h *dsttest.Harness, n int, sc dstScenario) []*dstNode {
 				h.Fail(err)
 				return
 			}
-			logs.noSync = sc.noSync
-			logs.splitBatches = sc.splitBatches
+			logs.noSync, logs.splitBatches = sc.noSync, sc.splitBatches
 			nd.logs = logs
 			stream, err := newDSTStream(w, nd.name+":7000")
 			if err != nil {
@@ -137,27 +188,26 @@ func dstClusterWith(h *dsttest.Harness, n int, sc dstScenario) []*dstNode {
 					return
 				}
 			}
-			nd.fsm = &seqFSM{h: h}
+			nd.fsm = &kvFSM{kv: map[string]string{}, h: h}
 			r, err := NewRaft(conf, nd.fsm, nd.logs, nd.logs, nd.snaps, trans)
 			if err != nil {
 				h.Fail(err)
 				return
 			}
 			nd.raft = r
-			// The workload: while leader, write numbered commands.
+			client++
+			cid := client // a client per boot: its operations are sequential
+			c := &kvClient{h: h, w: w, r: r, fsm: nd.fsm, hist: hist, id: cid, acked: acked, naive: sc.naiveReadIndex}
 			for h.Phase() == dsttest.Faulty {
 				if r.State() == Leader {
-					seq++
-					cmd := fmt.Sprintf("w%d", seq)
-					if r.Apply([]byte(cmd), 500*time.Millisecond).Error() == nil {
-						acked[cmd] = true
-						h.Sometimes("a write committed")
-					}
+					opID++
+					c.op(fmt.Sprintf("op%d", opID), keys[w.Rand().IntN(len(keys))])
 				}
 				w.Sleep(time.Duration(5+w.Rand().IntN(20)) * time.Millisecond)
 			}
 		})
 	}
+
 	// Election safety: at most one leader per term, ever (a crashed node's
 	// raft keeps its last state, so only running nodes count).
 	leaders := map[uint64]string{}
@@ -174,6 +224,9 @@ func dstClusterWith(h *dsttest.Harness, n int, sc dstScenario) []*dstNode {
 		}
 		return nil
 	})
+	h.Final("the clients' history is linearizable", func(w *dst.World) error {
+		return check.Linearizable(check.KVModel(), hist.Ops(), check.Options{}).Err()
+	})
 	h.Final("acknowledged writes survive", func(w *dst.World) error {
 		applied := map[string]bool{}
 		for _, nd := range nodes {
@@ -185,7 +238,7 @@ func dstClusterWith(h *dsttest.Harness, n int, sc dstScenario) []*dstNode {
 		}
 		for _, c := range slices.Sorted(maps.Keys(acked)) {
 			if !applied[c] {
-				return fmt.Errorf("%s was acknowledged but no node applied it", c)
+				return fmt.Errorf("write %s was acknowledged but no node applied it", c)
 			}
 		}
 		return nil
@@ -202,7 +255,7 @@ func dstClusterWith(h *dsttest.Harness, n int, sc dstScenario) []*dstNode {
 				continue
 			}
 			if got := nd.fsm.applied; !slices.Equal(got, longest[:len(got)]) {
-				return fmt.Errorf("%s applied %d entries that aren't a prefix of the longest (%d)", nd.name, len(got), len(longest))
+				return fmt.Errorf("%s applied %d commands that aren't a prefix of the longest (%d)", nd.name, len(got), len(longest))
 			}
 		}
 		seen := map[string]bool{}
@@ -217,8 +270,100 @@ func dstClusterWith(h *dsttest.Harness, n int, sc dstScenario) []*dstNode {
 		}
 		return nil
 	})
-	h.Expect("a write committed", "a snapshot was persisted")
+	h.Expect("a write committed", "a read through the log", "a ReadIndex read", "a snapshot was persisted")
 	return nodes
+}
+
+// kvClient issues operations on its node while the node leads.
+type kvClient struct {
+	h     *dsttest.Harness
+	w     *dst.World
+	r     *Raft
+	fsm   *kvFSM
+	hist  *check.History[check.KVInput, check.KVOutput]
+	id    int
+	acked map[string]bool
+	naive bool
+	// barrierTerm is the term in which this leader is known to have
+	// committed an entry (a Barrier returned): from then on its commit
+	// index covers everything committed before its term.
+	barrierTerm uint64
+}
+
+// op is one operation: a put through the log (half the time), or a get,
+// through the log or by ReadIndex.
+func (c *kvClient) op(id, key string) {
+	h, w, r := c.h, c.w, c.r
+	apply := func(cmd kvCmd) (kvResult, error) {
+		data, _ := json.Marshal(cmd)
+		f := r.Apply(data, 500*time.Millisecond)
+		if err := f.Error(); err != nil {
+			return kvResult{}, err
+		}
+		res, _ := f.Response().(kvResult)
+		return res, nil
+	}
+	// notApplied: errors that mean the command never entered the log.
+	notApplied := func(err error) bool { return errors.Is(err, ErrNotLeader) || errors.Is(err, ErrEnqueueTimeout) }
+	switch x := w.Rand().IntN(4); {
+	case x < 2:
+		call := c.hist.Invoke(c.id, check.KVInput{Op: check.KVPut, Key: key, Value: id})
+		_, err := apply(kvCmd{ID: id, Key: key, Value: id})
+		switch {
+		case err == nil:
+			c.acked[id] = true
+			call.Return(check.KVOutput{})
+			h.Sometimes("a write committed")
+		case notApplied(err):
+			call.Fail()
+		default:
+			call.Abandon() // it may still commit
+		}
+	case x == 2:
+		call := c.hist.Invoke(c.id, check.KVInput{Op: check.KVGet, Key: key})
+		res, err := apply(kvCmd{ID: id, Get: true, Key: key})
+		if err != nil {
+			call.Abandon()
+			return
+		}
+		call.Return(check.KVOutput{Value: res.Value, Found: res.Found})
+		h.Sometimes("a read through the log")
+	default:
+		c.readIndex(key)
+	}
+}
+
+// readIndex is a read by the ReadIndex recipe (Raft paper §6.4 and §8):
+// once per term, commit an entry of the term (a Barrier), so the commit
+// index is current; then for each read take the commit index, confirm
+// leadership (VerifyLeader: a quorum still follows), wait until the FSM
+// has applied that far, and read locally.
+func (c *kvClient) readIndex(key string) {
+	h, w, r := c.h, c.w, c.r
+	term := r.getCurrentTerm()
+	if !c.naive && c.barrierTerm != term {
+		if r.Barrier(500*time.Millisecond).Error() != nil || r.getCurrentTerm() != term {
+			return
+		}
+		c.barrierTerm = term
+	}
+	call := c.hist.Invoke(c.id, check.KVInput{Op: check.KVGet, Key: key})
+	idx := r.CommitIndex()
+	if err := r.VerifyLeader().Error(); err != nil || r.getCurrentTerm() != term {
+		call.Abandon()
+		return
+	}
+	deadline := w.Now().Add(500 * time.Millisecond)
+	for r.AppliedIndex() < idx {
+		if w.Now().After(deadline) {
+			call.Abandon()
+			return
+		}
+		w.Sleep(time.Millisecond)
+	}
+	res := c.fsm.read(key)
+	call.Return(check.KVOutput{Value: res.Value, Found: res.Found})
+	h.Sometimes("a ReadIndex read")
 }
 
 func dstOpts(f dsttest.Faults) dsttest.Options {
@@ -245,15 +390,16 @@ func TestDSTPartitions(t *testing.T) {
 	dsttest.Run(t, dstOpts(dsttest.Faults{Partition: true, Network: true}), func(h *dsttest.Harness) { dstCluster(h, 3) })
 }
 
-// TestDSTEverything: crashes, partitions, pauses and network faults at
-// once, five nodes.
+// TestDSTEverything: crashes, disk faults, partitions, pauses and network
+// faults at once, five nodes.
 func TestDSTEverything(t *testing.T) {
-	dsttest.Run(t, dstOpts(dsttest.Faults{Crash: true, Disk: true, Partition: true, Network: true, Pause: true}), func(h *dsttest.Harness) { dstCluster(h, 5) })
+	dsttest.Run(t, dstOpts(dsttest.Faults{Crash: true, Disk: true, Partition: true, Network: true, Pause: true}),
+		func(h *dsttest.Harness) { dstCluster(h, 5) })
 }
 
 // The store's guarantees matter: with fsync skipped (a store that returns
-// before its writes are durable), crashes lose acknowledged writes or
-// votes, and the checks catch it. Fails if no seed does.
+// before its writes are durable), crashes lose acknowledged writes, and
+// the checks catch it. Fails if no seed does.
 func TestDSTCatchesUnsyncedStore(t *testing.T) {
 	o := dstOpts(dsttest.Faults{Crash: true, Disk: true})
 	o.KeepGoing, o.DeterminismChecks = true, -1
@@ -262,4 +408,18 @@ func TestDSTCatchesUnsyncedStore(t *testing.T) {
 		t.Fatalf("no seed of %d caught a store that doesn't fsync", rep.Runs)
 	}
 	t.Logf("%d of %d seeds caught it; first: seed %d: %v", len(rep.Failed), rep.Runs, rep.Failed[0].Seed, rep.Failed[0].Err)
+}
+
+// The linearizability check catches the classic ReadIndex mistake: a new
+// leader serving reads from its commit index before it has committed an
+// entry in its own term, when that index can lag writes already
+// acknowledged. Fails if no seed catches it.
+func TestDSTCatchesNaiveReadIndex(t *testing.T) {
+	o := dstOpts(dsttest.Faults{Crash: true, Disk: true, Partition: true, Network: true, Pause: true})
+	o.KeepGoing, o.DeterminismChecks = true, -1
+	rep := dsttest.Sweep(o, func(h *dsttest.Harness) { dstClusterWith(h, 3, dstScenario{naiveReadIndex: true}) })
+	if len(rep.Failed) == 0 {
+		t.Fatalf("no seed of %d caught ReadIndex without a barrier", rep.Runs)
+	}
+	t.Logf("%d of %d seeds caught it", len(rep.Failed), rep.Runs)
 }
