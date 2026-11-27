@@ -40,6 +40,9 @@ type clusterSpec struct {
 	// drawConfig draws raft's configuration per seed (raftKnobs), the
 	// same on every node; otherwise it is dstConfig's, fixed.
 	drawConfig bool
+	// preVoteOff: elections without the pre-vote round (fixed
+	// configuration; a drawn one draws it).
+	preVoteOff bool
 	// noTransfers: no leadership transfers even when the seed draws them
 	// (scripts that need the leader to stay put).
 	noTransfers bool
@@ -286,6 +289,9 @@ func (c *simCluster) boot(nd *dstNode, w *dst.World, initial []Server) {
 		return
 	}
 	conf := dstConfig(w, nd.name)
+	if c.spec.preVoteOff {
+		conf.PreVoteDisabled = true
+	}
 	if c.spec.defaultTimeouts {
 		d := DefaultConfig()
 		conf.HeartbeatTimeout, conf.ElectionTimeout, conf.LeaderLeaseTimeout, conf.CommitTimeout = d.HeartbeatTimeout, d.ElectionTimeout, d.LeaderLeaseTimeout, d.CommitTimeout

@@ -6,8 +6,12 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
+
+	"github.com/prince776/go-dst-kit/dst"
+	"github.com/prince776/go-dst-kit/dsttest"
 )
 
 // The snapshot boundary (DST.md 6.11), scripted with raft's own test
@@ -268,5 +272,175 @@ func TestSnapshotFallbackGap(t *testing.T) {
 		t.Errorf("with the fix, NewRaft started from a snapshot the log doesn't follow")
 	} else {
 		t.Logf("with the fix: %v", err)
+	}
+}
+
+// removedCampaignScript (phase 2 step 4, upstream #524): a voter E is cut
+// off and removed (or demoted) without hearing of it, campaigns alone
+// (its term rising, without pre-vote), and comes back just as the
+// leader crashes, so the members hold an election while E campaigns. The
+// members must not take E's term: with "we have a leader" a healthy
+// cluster ignores E anyway (measured: no seed disrupted even with the
+// checks removed), so only an election shows what the checks protect. The checks 6b4e320 added
+// (#526) reject a candidate outside the receiver's configuration; bug 1's
+// fix (candidate-check-unless-ahead) relaxes them when the candidate's log
+// is ahead, which E's, having missed the change, isn't.
+func removedCampaignScript(preVoteOff, demote bool) func(h *dsttest.Harness) {
+	return func(h *dsttest.Harness) {
+		c := newCluster(h, clusterSpec{voters: 5, noTransfers: true, preVoteOff: preVoteOff})
+		h.Go(func(w *dst.World) {
+			var l *dstNode
+			for l == nil {
+				w.Sleep(50 * time.Millisecond)
+				l = c.leader()
+			}
+			w.Sleep(300 * time.Millisecond)
+			var e *dstNode
+			for _, nd := range c.nodes {
+				if nd != l {
+					e = nd
+					break
+				}
+			}
+			var others []string
+			for _, nd := range c.nodes {
+				if nd != e {
+					others = append(others, nd.name)
+				}
+			}
+			h.Partition([]string{e.name}, append(others, "test"))
+			var f Future
+			if demote {
+				f = l.raft.DemoteVoter(e.id(), 0, time.Second)
+			} else {
+				f = l.raft.RemoveServer(e.id(), 0, time.Second)
+			}
+			if err := f.Error(); err != nil {
+				h.Fail(fmt.Errorf("script: remove %s: %v", e.name, err))
+				return
+			}
+			w.Sleep(time.Duration(2000+w.Rand().IntN(2000)) * time.Millisecond)
+			base := l.raft.getCurrentTerm()
+			eTerm := e.raft.getCurrentTerm()
+			inflated := eTerm >= base+3
+			h.Heal()
+			l.m.Crash()
+			start := w.Now()
+			restarted := false
+			for w.Now().Sub(start) < 3*time.Second {
+				w.Sleep(20 * time.Millisecond)
+				if !restarted && w.Now().Sub(start) > 300*time.Millisecond {
+					l.m.Restart()
+					restarted = true
+				}
+				for _, nd := range c.nodes {
+					if nd == e || !nd.up() || demote {
+						continue
+					}
+					if t := nd.raft.getCurrentTerm(); inflated && t >= eTerm {
+						h.Fail(fmt.Errorf("the %s server %s (term %d; the cluster's %d) disrupted the cluster: %s took term %d in the election after the heal", map[bool]string{true: "demoted", false: "removed"}[demote], e.name, eTerm, base, nd.name, t))
+						return
+					}
+				}
+			}
+			if demote {
+				// A demoted voter's higher term is adopted on purpose
+				// (requestVote: "step down and update term, but reject the
+				// vote", #526), once, so the cluster can replicate to it.
+				// What must hold: then a stable leader among the voters, and
+				// the demoted server caught up as a non-voter.
+				var nl *dstNode
+				var lt uint64
+				for w.Now().Sub(start) < 6*time.Second {
+					w.Sleep(20 * time.Millisecond)
+					if x := c.leader(); x != nil && x != e {
+						if t := x.raft.getCurrentTerm(); x != nl || t != lt {
+							nl, lt = x, t
+							start2 := w.Now()
+							stable := true
+							for w.Now().Sub(start2) < 2*time.Second && stable {
+								w.Sleep(20 * time.Millisecond)
+								for _, nd := range c.nodes {
+									if nd != e && nd.up() && nd.raft.getCurrentTerm() != lt {
+										stable = false
+									}
+								}
+							}
+							if stable {
+								break
+							}
+						}
+					}
+				}
+				if nl == nil || w.Now().Sub(start) >= 6*time.Second {
+					h.Fail(fmt.Errorf("the demoted server %s (term %d; the cluster's %d) disrupted the cluster: no leader held its term for 2s within 6s of the heal:\n%s", e.name, eTerm, base, c.describe()))
+					return
+				}
+				if e.raft.getCurrentTerm() > lt || e.raft.getLastIndex() < nl.raft.getCommitIndex() {
+					// Give it a moment to catch up.
+					w.Sleep(500 * time.Millisecond)
+					if e.raft.getCurrentTerm() > nl.raft.getCurrentTerm() || e.raft.getLastIndex() < nl.raft.getCommitIndex() {
+						h.Fail(fmt.Errorf("the demoted server %s disrupted the cluster: it never rejoined as a non-voter (term %d against the leader's %d, last log %d against commit %d)", e.name, e.raft.getCurrentTerm(), nl.raft.getCurrentTerm(), e.raft.getLastIndex(), nl.raft.getCommitIndex()))
+						return
+					}
+				}
+			}
+			if inflated {
+				h.Sometimes("the removed server came back with a higher term")
+			}
+			h.Sometimes("the script ran")
+		})
+		h.Expect("the script ran")
+	}
+}
+
+// TestRemovedServerCampaigns (phase 2 step 4): measures, over seeds, that a
+// server removed without its participation doesn't disrupt the cluster
+// when it comes back (#524): with correct raft, with or without pre-vote;
+// and with bug 1's proposed fix. With the #526 checks removed
+// (no-candidate-config-check) it reports whether anything else still
+// protects the cluster.
+//
+// Fails if: correct raft or the fix lets the server disrupt the cluster,
+// or the script never ran, or the server never came back with a higher
+// term without pre-vote (the scenario wouldn't test anything).
+func TestRemovedServerCampaigns(t *testing.T) {
+	defer func() { activeBug = "" }()
+	o := dstOpts(dsttest.Faults{})
+	o.Seeds, o.KeepGoing, o.DeterminismChecks = 20, true, -1
+	for _, c := range []struct {
+		name               string
+		bug                string
+		preVoteOff, demote bool
+		want               string // "pass", "fail" (must be disrupted on some seed), or "" (reported)
+	}{
+		{"removed, correct, pre-vote off", "", true, false, "pass"},
+		{"removed, correct, pre-vote on", "", false, false, "pass"},
+		{"removed, bug 1's fix, pre-vote off", "candidate-check-unless-ahead", true, false, "pass"},
+		{"removed, #526's checks removed, pre-vote off", "no-candidate-config-check", true, false, "fail"},
+		{"demoted, correct, pre-vote off", "", true, true, "pass"},
+		{"demoted, correct, pre-vote on", "", false, true, "pass"},
+		{"demoted, bug 1's fix, pre-vote off", "candidate-check-unless-ahead", true, true, "pass"},
+		{"demoted, #526's checks removed, pre-vote off", "no-candidate-config-check", true, true, ""},
+	} {
+		activeBug = c.bug
+		rep := dsttest.Sweep(o, removedCampaignScript(c.preVoteOff, c.demote))
+		disrupted := 0
+		for _, r := range rep.Failed {
+			if !strings.Contains(r.Err.Error(), "disrupted the cluster") {
+				t.Fatalf("%s: seed %d failed otherwise: %v", c.name, r.Seed, r.Err)
+			}
+			disrupted++
+		}
+		switch {
+		case c.want == "pass" && disrupted > 0:
+			t.Errorf("%s: disrupted on %d of %d seeds: %v", c.name, disrupted, rep.Runs, rep.Failed[0].Err)
+		case c.want == "fail" && disrupted == 0:
+			t.Errorf("%s: never disrupted: the scenario can't show what the checks protect", c.name)
+		}
+		if c.preVoteOff && rep.Coverage["the removed server came back with a higher term"] == 0 {
+			t.Errorf("%s: the server never came back with a higher term", c.name)
+		}
+		t.Logf("%s: disrupted on %d of %d seeds", c.name, disrupted, rep.Runs)
 	}
 }

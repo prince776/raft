@@ -203,9 +203,8 @@ judge a candidate only then). Switch `candidate-check-unless-ahead`
 (`dstfix.go`): the sequence recovers on 20 of 20 seeds, and the membership
 sweep still passes 200 seeds. Caveat: the sweep also passes with the checks
 removed entirely, so it doesn't exercise the disruption the checks were
-added for (#524); that the fix keeps that protection is argued, not
-measured. A scenario for #524 (a node that missed configuration changes,
-campaigning) belongs to phase 2.
+added for (#524). Phase 2 step 4 measured it: the fix keeps that
+protection (`TestRemovedServerCampaigns`, below).
 
 **Upstream-ready:** branch `fix/stale-config-vote` (based on upstream
 `main`, `dd4346d`; nothing from the simulation) with the fix and two tests
@@ -836,6 +835,33 @@ having no effect (it changes nothing), and, since the check runs after
 every member caught up, an unknown write that no node applied is removed
 (it never took effect; removing it can only make the check stricter).
 Seeds that took 10s and gave up now pass in 2–7s.
+
+### Step 4: a removed server campaigning (#524) (as built)
+
+`TestRemovedServerCampaigns` (`dst_boundary_scripted_test.go`): a voter
+is cut off and removed (or demoted) without hearing of it, campaigns
+alone, and comes back just as the leader crashes, so the voters hold an
+election while it campaigns with its inflated term. 20 seeds per row:
+
+| Server | Raft | Pre-vote | Disrupted |
+|---|---|---|---|
+| removed | correct | off | 0 |
+| removed | correct | on | 0 |
+| removed | bug 1's fix (`candidate-check-unless-ahead`) | off | 0 |
+| removed | #526's checks removed (`no-candidate-config-check`) | off | 18 |
+| demoted | correct, the fix, or the checks removed | off/on | 0 |
+
+For a removed server, "disrupted" is a voter taking its term; the checks
+are what prevent it, and bug 1's fix keeps them (the returning server's
+log, having missed the removal, isn't ahead). Without the crash nothing
+is disrupted even with the checks removed: a voter that has a leader
+refuses every vote ("we have a leader"), so only an election shows what
+the checks protect. For a demoted server one term jump is by design
+(requestVote: "step down and update term, but reject the vote", #526, so
+the cluster can replicate to it); the test requires a voter leader that
+then holds its term for 2s and the demoted server caught up as a
+non-voter. With pre-vote on, nothing is disrupted in any row: pre-vote
+alone covers #524 when the transport supports it.
 
 ## 11. How to run
 
