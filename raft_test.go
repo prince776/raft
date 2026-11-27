@@ -3592,10 +3592,11 @@ func TestRaft_AppendEntries_PrevLogAtSnapshotBoundary(t *testing.T) {
 }
 
 // TestRaft_InstallSnapshot_IgnoresSnapshotOlderThanApplied checks that a
-// follower doesn't install a snapshot that ends before what it has already
-// applied. Installing it moved the follower's state machine back in time,
-// and, with its own snapshot having compacted the entries after it, the
-// follower then could neither replay them nor accept the leader's entries.
+// follower that already holds a snapshot's last entry doesn't install the
+// snapshot (Figure 13, rule 6). Installing it moved the follower's state
+// machine back in time, and, with its own snapshot having compacted the
+// entries after it, the follower then could neither replay them nor
+// accept the leader's entries.
 func TestRaft_InstallSnapshot_IgnoresSnapshotOlderThanApplied(t *testing.T) {
 	c, leader, follower, trans := snapshotBoundaryCluster(t, 10)
 	defer c.Close()

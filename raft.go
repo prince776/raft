@@ -1841,6 +1841,17 @@ func (r *Raft) requestPreVote(rpc RPC, req *RequestPreVoteRequest) {
 	resp.Granted = true
 }
 
+// holdsEntry reports whether we hold the entry at index with term: in our
+// log, or covered by our own snapshot (whose entries are committed, so
+// they match any leader's).
+func (r *Raft) holdsEntry(index, term uint64) bool {
+	if snapIdx, _ := r.getLastSnapshot(); index <= snapIdx {
+		return true
+	}
+	var l Log
+	return r.logs.GetLog(index, &l) == nil && l.Term == term
+}
+
 // installSnapshot is invoked when we get a InstallSnapshot RPC call.
 // We must be in the follower state for this, since it means we are
 // too far behind a leader for log replay. This must only be called
@@ -1903,12 +1914,13 @@ func (r *Raft) installSnapshot(rpc RPC, req *InstallSnapshotRequest) {
 		reqConfigurationIndex = req.LastLogIndex
 	}
 
-	// A valid snapshot that ends at or before what we have applied holds nothing
-	// new. Installing it would move the state machine back in time, and
-	// the entries after it may already be compacted away. Acknowledge it,
-	// so the leader carries on from its end.
-	if req.LastLogIndex <= r.getLastApplied() {
-		r.logger.Info("ignoring snapshot older than our applied state",
+	// Figure 13, rule 6: if we already hold the snapshot's last entry, we
+	// continue from it without installing the snapshot. Installing it
+	// anyway could move the state machine back in time, and leave us
+	// unable to replay the entries after it if our own snapshot has
+	// compacted them away.
+	if r.holdsEntry(req.LastLogIndex, req.LastLogTerm) {
+		r.logger.Info("not installing a snapshot whose last entry we hold",
 			"snapshot-index", req.LastLogIndex, "applied-index", r.getLastApplied())
 		resp.Success = true
 		return
