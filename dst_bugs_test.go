@@ -323,7 +323,7 @@ func TestDSTDiskErrorsFixed(t *testing.T) {
 }
 
 // knownFixes are the proposed fixes for the raft bugs found so far.
-const knownFixes = "candidate-check-unless-ahead,bootstrap-log-first,snapshot-boundary-fix,snapshot-fallback-needs-log,heartbeat-on-main-thread,transfer-send-stoppable"
+const knownFixes = "candidate-check-unless-ahead,bootstrap-log-first,snapshot-boundary-fix,snapshot-fallback-needs-log,heartbeat-on-main-thread,transfer-send-stoppable,pipeline-close-on-abort,snapshot-install-rule7"
 
 // TestDSTMembershipFixed: the membership sweep with servers lost for good
 // and replaced, with the proposed fixes on. Correct raft stalls on some
@@ -363,7 +363,9 @@ func TestDSTSnapshotBoundary(t *testing.T) {
 			newCluster(h, clusterSpec{voters: 5, drawConfig: true, forceTrailing: true, forceTrailingLogs: 0})
 		})
 	}
-	if rep := sweep("snapshot-boundary-fix"); len(rep.Failed) > 0 {
+	// With every known fix (the boundary fix among them): the other
+	// upstream bugs show in this sweep too since transfers joined it.
+	if rep := sweep(knownFixes); len(rep.Failed) > 0 {
 		t.Errorf("with the fix, %d of %d seeds failed: %v", len(rep.Failed), rep.Runs, rep.Failed[0].Err)
 	}
 }

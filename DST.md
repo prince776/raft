@@ -500,6 +500,57 @@ Matching breaks, and raft can't notice. A defensive option for upstream:
 let `RecoverCluster` take a term at least as high as any the operator saw
 (or bump the stored term by a margin), so recovered terms never collide.
 
+### 6.16 A rejected pipelined append deadlocks replication to that follower for good (liveness; upstream #612)
+
+Found by the strict disk-errors sweep at 400 seeds (seed 240). A
+follower's `StoreLogs` fails once (here a failed fsync); it rejects that
+pipelined append, and the next ones ("failed to get previous log").
+raft's `pipelineDecode` sees the rejection and returns, so nothing reads
+the transport's `doneCh` any more. `netPipeline.decodeResponses` blocks
+handing over the next response and stops taking requests from
+`inprogressCh`; the replication goroutine, inside `pipelineSend`, blocks
+handing over its next request (both channels are unbuffered at the
+default `MaxRPCsInFlight` of 2, capacity `maxInFlight-2`). It never gets
+back to the `select` that would see the decoder finished, so
+`pipeline.Close`, deferred after that loop, never runs. The leader never
+sends that follower entries again, while heartbeats (their own
+goroutine) go on: the follower stays at its last index, 20s after the
+faults (stacks taken from the simulation's goroutines confirm each
+step).
+
+This is the root cause of [#612](https://github.com/hashicorp/raft/issues/612)
+(open since 2024-08: "Leader stopped sending appendEntries to the
+follower, but heartbeat was working", after a MySQL-backed log store
+failed one `StoreLogs` with a deadlock error, then two "failed to get
+previous log"; the maintainers hadn't seen it before). One difference:
+our run logs "aborting pipeline replication"; the reporter found no such
+line.
+
+Fix (switch `pipeline-close-on-abort`, in `knownFixes`): the decoder closes
+the pipeline as it exits, which unblocks both sides; replication falls
+back to plain RPCs. Seed 240 passes with it. Upstream-style reproduction:
+a todo (it needs pipelining over a real transport and a store failing one
+append).
+
+### 6.17 InstallSnapshot keeps a log that conflicts with the snapshot (safety; upstream #697, rule 7)
+
+Found by "logs match" in the strict membership sweep at 400 seeds (seed
+266). n3 holds entry 210 from term 4; the leader installs a snapshot
+ending at 210, term 5. `installSnapshot` only compacts by `TrailingLogs`
+("no logs to truncate"), so the conflicting 210 stays, and the next append
+stores 211 (term 5) after it: two logs hold 211 after different entries.
+Figure 13 rule 7: keep the entries following the snapshot only if the log
+holds the snapshot's last entry (same index and term); otherwise discard
+the whole log. This is the half of Antithesis's
+[#697](https://github.com/hashicorp/raft/issues/697) ("InstallSnapshot
+keeps a conflicting log suffix (Figure 13 rule 7)") that 6.11 (rule 6)
+didn't cover; an end-to-end check saw it only once a stale entry was
+served.
+
+Fix (switch `snapshot-install-rule7`, in `knownFixes`): discard the log
+when it doesn't hold the snapshot's last entry, and set the last log to the
+snapshot. Seed 266 passes with it.
+
 ## 7. The bug benchmark
 
 `dstbench.json`: bugs behind switches (`bug(name)` in `dstbugs*.go`, only
@@ -585,7 +636,7 @@ a gap:
 |---|---|---|---|
 | [#695](https://github.com/hashicorp/raft/issues/695) | Heartbeats handled on the transport goroutine bump the term concurrently with the leader loop: logs diverge (safety) | **Found in phase 2** (6.13): "terms never go back" catches its alternate manifestation on 13 of 250 default seeds; divergence itself not seen yet | Phase 3-4: exploration for the divergence |
 | [#696](https://github.com/hashicorp/raft/issues/696) | An interrupted leadership transfer leaves "leadership transfer in progress" set: the re-elected leader refuses writes (liveness) | **Found in phase 2** (6.14): with transfers in the workload, on 3 of 250 default seeds; root cause and a fix | — |
-| [#697](https://github.com/hashicorp/raft/issues/697) | InstallSnapshot keeps a conflicting log suffix (Figure 13 rule 7): a follower loops on snapshots (liveness) | "The cluster recovers" only needs the leader to commit; "same sequence" accepts a follower stuck on a prefix | Phase 2: every node converges after the faults; phase 1 item 3: snapshots on the simulated disk |
+| [#697](https://github.com/hashicorp/raft/issues/697) | InstallSnapshot keeps a conflicting log suffix (Figure 13 rule 7): a follower loops on snapshots (liveness) | **Found**: its rule-6 relative in phase 1 (6.11), its rule-7 mechanism in phase 2 by "logs match" (6.17) | — |
 | [#746](https://github.com/hashicorp/raft/issues/746) | `persistVote` writes term and candidate as two writes; a crash between them lets a stale vote skip the log check (safety) | Needs pre-vote off; our config never turns it off | Phase 1 item 7: draw the configuration per seed (pre-vote on or off); the crash class is the one that found 6.2 |
 
 Plan: these join the benchmark as "live" entries (no switch: correct raft

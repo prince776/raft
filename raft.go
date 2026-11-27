@@ -2274,6 +2274,23 @@ func (r *Raft) installSnapshot(rpc RPC, req *InstallSnapshotRequest) {
 	r.setLatestConfiguration(reqConfiguration, reqConfigurationIndex)
 	r.setCommittedConfiguration(reqConfiguration, reqConfigurationIndex)
 
+	if bug("snapshot-install-rule7") {
+		var l Log
+		if err := r.logs.GetLog(req.LastLogIndex, &l); err != nil || l.Term != req.LastLogTerm {
+			// Figure 13 rule 7: the log doesn't hold the snapshot's last
+			// entry, so none of it can be trusted: discard it all.
+			first, err1 := r.logs.FirstIndex()
+			last, err2 := r.logs.LastIndex()
+			if err1 == nil && err2 == nil && first > 0 && last >= first {
+				if err := r.logs.DeleteRange(first, last); err != nil {
+					r.logger.Error("failed to discard a log the snapshot conflicts with", "error", err)
+					rpcErr = err
+					return
+				}
+			}
+			r.setLastLog(req.LastLogIndex, req.LastLogTerm)
+		}
+	}
 	// Clear old logs if r.logs is a MonotonicLogStore. Otherwise compact the
 	// logs. In both cases, log any errors and continue.
 	if mlogs, ok := r.logs.(MonotonicLogStore); ok && mlogs.IsMonotonic() {

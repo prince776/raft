@@ -236,8 +236,14 @@ func (c *simCluster) recovers(w *dst.World) error {
 // same sequence" accepts a member stuck on a prefix, so neither sees a
 // follower that never catches up (a livelock like #697's snapshot loop,
 // or bug 4's).
+//
+// The bound adds raft's longest replication backoff: after repeated
+// failures to a follower (a flaky one, under disk errors) the leader waits
+// up to failureWait·2^(maxFailureScale-2) = 10.24s before trying it again,
+// by design.
 func (c *simCluster) catchesUp(w *dst.World) error {
-	deadline := w.Now().Add(c.patience())
+	bound := c.patience() + backoff(failureWait, maxFailureScale, maxFailureScale)
+	deadline := w.Now().Add(bound)
 	var target uint64
 	for {
 		if l := c.leader(); l != nil && target == 0 {
@@ -262,9 +268,9 @@ func (c *simCluster) catchesUp(w *dst.World) error {
 		}
 		if w.Now().After(deadline) {
 			if target == 0 {
-				return fmt.Errorf("no leader %v after the faults ended:\n%s", c.patience(), c.describe())
+				return fmt.Errorf("no leader %v after the faults ended:\n%s", bound, c.describe())
 			}
-			return fmt.Errorf("%v after the faults ended, %v haven't applied the leader's commit index %d:\n%s", c.patience(), behind, target, c.describe())
+			return fmt.Errorf("%v after the faults ended, %v haven't applied the leader's commit index %d:\n%s", bound, behind, target, c.describe())
 		}
 		w.Sleep(50 * time.Millisecond)
 	}

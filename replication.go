@@ -613,6 +613,9 @@ func (r *Raft) pipelineSend(s *followerReplication, p AppendPipeline, nextIdx *u
 // pipelineDecode is used to decode the responses of pipelined requests.
 func (r *Raft) pipelineDecode(s *followerReplication, p AppendPipeline, stopCh, finishCh dst.Chan[struct{}]) {
 	defer finishCh.Close()
+	if bug("pipeline-close-on-abort") {
+		defer p.Close()
+	}
 	respCh := p.Consumer()
 	for {
 		{

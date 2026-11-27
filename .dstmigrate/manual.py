@@ -595,3 +595,48 @@ edit('raft.go', in_func('func (r *Raft) leadershipTransfer(id ServerID', '''		re
 			repl.triggerDeferErrorCh.Send(err)
 		}
 '''))
+
+# Experimental fix (DST.md 6.16, upstream #612): when raft's pipeline
+# decoder stops (a rejected or failed append), nothing reads the
+# transport's doneCh any more; netPipeline.decodeResponses blocks handing
+# over the next response, so it stops taking from inprogressCh, and the
+# replication goroutine, inside pipelineSend, blocks handing over its next
+# request (both channels unbuffered at the default MaxRPCsInFlight). It
+# never reaches the select that would see the decoder finished, so
+# pipeline.Close (deferred after that loop) never runs: replication to the
+# follower stops for good while heartbeats go on. With the fix the decoder
+# closes the pipeline as it exits, which unblocks both.
+edit('replication.go', in_func('func (r *Raft) pipelineDecode(', '''	defer finishCh.Close()
+''', '''	defer finishCh.Close()
+	if bug("pipeline-close-on-abort") {
+		defer p.Close()
+	}
+'''))
+
+# Experimental fix (DST.md 6.17, upstream #697's rule-7 half): installSnapshot
+# keeps the follower's log as it is (compacting by TrailingLogs), even when
+# the log's entry at the snapshot's last index has another term, so
+# entries that conflict with the snapshot stay, and the next append lands
+# after them (Log Matching broken in the store). Figure 13 rule 7: if the
+# log holds the snapshot's last entry (same index and term), keep what
+# follows it; otherwise discard the entire log.
+edit('raft.go', in_func('func (r *Raft) installSnapshot(', '''	// Clear old logs if r.logs is a MonotonicLogStore. Otherwise compact the
+	// logs. In both cases, log any errors and continue.''', '''	if bug("snapshot-install-rule7") {
+		var l Log
+		if err := r.logs.GetLog(req.LastLogIndex, &l); err != nil || l.Term != req.LastLogTerm {
+			// Figure 13 rule 7: the log doesn't hold the snapshot's last
+			// entry, so none of it can be trusted: discard it all.
+			first, err1 := r.logs.FirstIndex()
+			last, err2 := r.logs.LastIndex()
+			if err1 == nil && err2 == nil && first > 0 && last >= first {
+				if err := r.logs.DeleteRange(first, last); err != nil {
+					r.logger.Error("failed to discard a log the snapshot conflicts with", "error", err)
+					rpcErr = err
+					return
+				}
+			}
+			r.setLastLog(req.LastLogIndex, req.LastLogTerm)
+		}
+	}
+	// Clear old logs if r.logs is a MonotonicLogStore. Otherwise compact the
+	// logs. In both cases, log any errors and continue.'''))
