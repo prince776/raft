@@ -1664,7 +1664,8 @@ func (r *Raft) requestVote(rpc RPC, req *RequestVoteRequest) {
 		candidateID := ServerID(req.ID)
 		// if the Servers list is empty that mean the cluster is very likely trying to bootstrap,
 		// Grant the vote
-		if len(r.configurations.latest.Servers) > 0 && !inConfiguration(r.configurations.latest, candidateID) {
+		if len(r.configurations.latest.Servers) > 0 && !inConfiguration(r.configurations.latest, candidateID) &&
+			!r.candidateLogIsAhead(req.LastLogTerm, req.LastLogIndex) {
 			r.logger.Warn("rejecting vote request since node is not in configuration",
 				"from", candidate)
 			return
@@ -1700,7 +1701,8 @@ func (r *Raft) requestVote(rpc RPC, req *RequestVoteRequest) {
 	// More details about that in https://github.com/hashicorp/raft/pull/526
 	if len(req.ID) > 0 {
 		candidateID := ServerID(req.ID)
-		if len(r.configurations.latest.Servers) > 0 && !hasVote(r.configurations.latest, candidateID) {
+		if len(r.configurations.latest.Servers) > 0 && !hasVote(r.configurations.latest, candidateID) &&
+			!r.candidateLogIsAhead(req.LastLogTerm, req.LastLogIndex) {
 			r.logger.Warn("rejecting vote request since node is not a voter", "from", candidate)
 			return
 		}
@@ -1755,6 +1757,26 @@ func (r *Raft) requestVote(rpc RPC, req *RequestVoteRequest) {
 	r.setLastContact()
 }
 
+// candidateLogIsAhead reports whether a candidate's last log entry is more
+// up to date than ours (a later term, or the same term and a later index).
+//
+// The vote and pre-vote handlers reject candidates that aren't voters in
+// our latest configuration, so that a server that missed its own removal
+// or demotion can't disrupt the cluster (see #524 and #526). But our latest
+// configuration is only as new as our log. If the candidate's log is ahead
+// of ours, it may hold configuration changes we haven't seen yet, in which
+// it is a voter; rejecting it on the strength of our stale configuration
+// can leave a cluster without a leader for good, even with a live majority
+// of voters. In that case we leave the decision to Raft's election
+// restriction alone, as the Raft paper does: this only grants votes the
+// paper would grant, so it can't weaken election safety. A server that
+// missed its removal has a log behind the cluster's, so it is still
+// rejected.
+func (r *Raft) candidateLogIsAhead(lastLogTerm, lastLogIndex uint64) bool {
+	lastIdx, lastTerm := r.getLastEntry()
+	return lastLogTerm > lastTerm || (lastLogTerm == lastTerm && lastLogIndex > lastIdx)
+}
+
 // requestPreVote is invoked when we get a request Pre-Vote RPC call.
 func (r *Raft) requestPreVote(rpc RPC, req *RequestPreVoteRequest) {
 	defer metrics.MeasureSince([]string{"raft", "rpc", "requestPreVote"}, time.Now())
@@ -1777,7 +1799,8 @@ func (r *Raft) requestPreVote(rpc RPC, req *RequestPreVoteRequest) {
 
 	// if the Servers list is empty that mean the cluster is very likely trying to bootstrap,
 	// Grant the vote
-	if len(r.configurations.latest.Servers) > 0 && !inConfiguration(r.configurations.latest, candidateID) {
+	if len(r.configurations.latest.Servers) > 0 && !inConfiguration(r.configurations.latest, candidateID) &&
+		!r.candidateLogIsAhead(req.LastLogTerm, req.LastLogIndex) {
 		r.logger.Warn("rejecting pre-vote request since node is not in configuration",
 			"from", candidate)
 		return
@@ -1804,7 +1827,8 @@ func (r *Raft) requestPreVote(rpc RPC, req *RequestPreVoteRequest) {
 
 	// if we get a request for a pre-vote from a nonVoter  and the request term is higher, do not grant the Pre-Vote
 	// This could happen when a node, previously voter, is converted to non-voter
-	if len(r.configurations.latest.Servers) > 0 && !hasVote(r.configurations.latest, candidateID) {
+	if len(r.configurations.latest.Servers) > 0 && !hasVote(r.configurations.latest, candidateID) &&
+		!r.candidateLogIsAhead(req.LastLogTerm, req.LastLogIndex) {
 		r.logger.Warn("rejecting pre-vote request since node is not a voter", "from", candidate)
 		return
 	}

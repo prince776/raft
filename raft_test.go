@@ -3501,3 +3501,142 @@ func TestRaft_PreVote_ShouldRejectNonLeader(t *testing.T) {
 		t.Fatalf("expected pre-vote to not be granted, but it was granted, %+v", resp)
 	}
 }
+
+// TestRaft_StaleVoterCanElectNewerVoter checks that a voter that missed
+// configuration changes still votes for a candidate whose log is ahead of
+// its own, even when its stale configuration doesn't list that candidate.
+//
+// Voters {A, B, C}. C is partitioned. Meanwhile B is replaced by D: D is
+// added, then B is removed, giving voters {A, C, D}. Then A fails for good.
+// C and D are a majority of {A, C, D}, so the cluster must be able to elect
+// D (the most up-to-date server). But C's latest configuration is still
+// {A, B, C}, which doesn't contain D; C used to reject D's (pre-)vote
+// request for that reason, and no leader could ever be elected.
+func TestRaft_StaleVoterCanElectNewerVoter(t *testing.T) {
+	for _, preVoteDisabled := range []bool{false, true} {
+		t.Run(fmt.Sprintf("PreVoteDisabled=%v", preVoteDisabled), func(t *testing.T) {
+			conf := inmemConfig(t)
+			conf.PreVoteDisabled = preVoteDisabled
+			c := MakeCluster(3, t, conf)
+			defer c.Close()
+
+			a := c.Leader()
+			followers := c.WaitForFollowers(2)
+			b, stale := followers[0], followers[1]
+
+			// D joins the cluster's transports, then C is cut off before D is
+			// added, so C never hears of D.
+			c1 := MakeClusterNoBootstrap(1, t, conf)
+			d := c1.rafts[0]
+			c.Merge(c1)
+			c.FullyConnect()
+			c.Disconnect(stale.localAddr)
+
+			// Replace B with D.
+			if err := a.AddVoter(d.localID, d.localAddr, 0, 0).Error(); err != nil {
+				t.Fatalf("AddVoter(D): %v", err)
+			}
+			remove := a.RemoveServer(b.localID, 0, 0)
+			if err := remove.Error(); err != nil {
+				t.Fatalf("RemoveServer(B): %v", err)
+			}
+			// Wait for D to know {A, C, D} is committed.
+			limit := time.Now().Add(c.longstopTimeout)
+			for d.getCommitIndex() < remove.Index() {
+				if time.Now().After(limit) {
+					t.Fatalf("D never committed the removal of B")
+				}
+				time.Sleep(10 * time.Millisecond)
+			}
+
+			// A and B go away for good; C rejoins.
+			for _, r := range []*Raft{a, b} {
+				if err := r.Shutdown().Error(); err != nil {
+					t.Fatalf("shutdown: %v", err)
+				}
+			}
+			c.FullyConnect()
+			c.Disconnect(a.localAddr)
+			c.Disconnect(b.localAddr)
+			if cfg := c.getConfiguration(stale); inConfiguration(cfg, d.localID) {
+				t.Fatalf("test setup: C already knows D: %v", cfg.Servers)
+			}
+
+			// C and D must elect a leader, and C must learn {A, C, D}.
+			limit = time.Now().Add(c.longstopTimeout)
+			for {
+				leader := d.getState() == Leader || stale.getState() == Leader
+				if leader && inConfiguration(c.getConfiguration(stale), d.localID) {
+					break
+				}
+				if time.Now().After(limit) {
+					t.Fatalf("no leader among C and D (states %v, %v); C's configuration %v",
+						stale.getState(), d.getState(), c.getConfiguration(stale).Servers)
+				}
+				time.Sleep(10 * time.Millisecond)
+			}
+		})
+	}
+}
+
+// TestRaft_VoteGranted_WhenCandidateLogAheadOfStaleConfiguration sends vote
+// and pre-vote requests straight to a server whose latest configuration
+// doesn't contain the candidate: rejected while the candidate's log isn't
+// ahead of the server's (the server's configuration is then at least as new
+// as anything the candidate knows), granted once it is.
+func TestRaft_VoteGranted_WhenCandidateLogAheadOfStaleConfiguration(t *testing.T) {
+	conf := inmemConfig(t)
+	c := MakeCluster(3, t, conf)
+	defer c.Close()
+	leader := c.Leader()
+	follower := c.WaitForFollowers(2)[0]
+	// Isolate the follower, and wait until it has forgotten the leader (it
+	// rejects every candidate while it knows one).
+	c.Disconnect(follower.localAddr)
+	c.Disconnect(leader.localAddr)
+	limit := time.Now().Add(c.longstopTimeout)
+	for addr, _ := follower.LeaderWithID(); addr != ""; addr, _ = follower.LeaderWithID() {
+		if time.Now().After(limit) {
+			t.Fatalf("the isolated follower still knows a leader")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	_, trans := NewInmemTransport("")
+	trans.Connect(follower.localAddr, c.trans[c.IndexOf(follower)])
+	c.trans[c.IndexOf(follower)].Connect(trans.LocalAddr(), trans)
+
+	lastIdx, lastTerm := follower.getLastEntry()
+	stranger := []byte("stranger")
+	header := RPCHeader{ProtocolVersion: ProtocolVersionMax, ID: stranger, Addr: []byte(trans.LocalAddr())}
+	for _, tc := range []struct {
+		name        string
+		term, index uint64
+		wantGranted bool
+	}{
+		{"same log", lastTerm, lastIdx, false},
+		{"behind", lastTerm, lastIdx - 1, false},
+		{"ahead by index", lastTerm, lastIdx + 1, true},
+		{"ahead by term", lastTerm + 1, 1, true},
+	} {
+		term := follower.getCurrentTerm() + 1
+		var pre RequestPreVoteResponse
+		if err := trans.RequestPreVote(follower.localID, follower.localAddr, &RequestPreVoteRequest{
+			RPCHeader: header, Term: term, LastLogIndex: tc.index, LastLogTerm: tc.term,
+		}, &pre); err != nil {
+			t.Fatalf("%s: RequestPreVote: %v", tc.name, err)
+		}
+		if pre.Granted != tc.wantGranted {
+			t.Errorf("%s: pre-vote granted %v, want %v", tc.name, pre.Granted, tc.wantGranted)
+		}
+		var vote RequestVoteResponse
+		if err := trans.RequestVote(follower.localID, follower.localAddr, &RequestVoteRequest{
+			RPCHeader: header, Term: term, LastLogIndex: tc.index, LastLogTerm: tc.term,
+		}, &vote); err != nil {
+			t.Fatalf("%s: RequestVote: %v", tc.name, err)
+		}
+		if vote.Granted != tc.wantGranted {
+			t.Errorf("%s: vote granted %v, want %v", tc.name, vote.Granted, tc.wantGranted)
+		}
+	}
+}
