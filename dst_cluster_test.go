@@ -30,6 +30,11 @@ type clusterSpec struct {
 	// operator runs membership changes (dst_operator_test.go), and takes
 	// tickets for machines the runner loses for good (Faults.Loss).
 	operator bool
+	// defaultTimeouts runs raft with its own default timeouts (heartbeat
+	// and election 1s, lease 500ms, commit 50ms) instead of a fifth of
+	// them. Raft needs round trips well under its election timeout; slow
+	// links (Faults.Gray) can take longer than a fifth of the defaults.
+	defaultTimeouts bool
 }
 
 // dstScenario switches weaker modes on, each to show a check catches what
@@ -142,6 +147,10 @@ func (c *simCluster) boot(nd *dstNode, w *dst.World, initial []Server) {
 	trans := NewNetworkTransportWithConfig(&NetworkTransportConfig{Stream: stream, MaxPool: 3, Timeout: 500 * time.Millisecond,
 		Logger: hclog.NewNullLogger(), World: w})
 	conf := dstConfig(w, nd.name)
+	if c.spec.defaultTimeouts {
+		d := DefaultConfig()
+		conf.HeartbeatTimeout, conf.ElectionTimeout, conf.LeaderLeaseTimeout, conf.CommitTimeout = d.HeartbeatTimeout, d.ElectionTimeout, d.LeaderLeaseTimeout, d.CommitTimeout
+	}
 	if nd.initial {
 		if ok, _ := HasExistingState(nd.logs, nd.logs, nd.snaps); !ok {
 			if err := BootstrapCluster(conf, nd.logs, nd.logs, nd.snaps, trans, Configuration{Servers: initial}); err != nil {

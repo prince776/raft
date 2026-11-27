@@ -8,7 +8,7 @@ whole cluster runs in one process, deterministically, under injected
 faults, and any failing run replays exactly from its seed.
 
 Status as of 2026-11-27. Phase 1 (the simulated world and its faults) is
-in progress: item 1 of 7 is done. Phases 2 to 4 (better tests, then plain
+in progress: items 1 and 2 of 7 are done. Phases 2 to 4 (better tests, then plain
 exploration, then guided exploration) haven't started.
 
 ## Contents
@@ -70,7 +70,8 @@ phase; drawing them per seed is planned. A run has a 10s fault phase and a
 | Pause | A machine freezes (a GC or VM stall), then resumes |
 | Clocks | Always on: offset up to ±10ms, rate ±100ppm per machine (go-dst-kit's defaults, not raft's limits); start times near day, month and year boundaries |
 | Scheduling | Goroutine interleavings, uniform or PCT |
-| Loss (new) | A machine dies for good, with its disk; the test is told (a ticket) and replaces it |
+| Loss | A machine dies for good, with its disk; the test is told (a ticket) and replaces it |
+| Gray (new) | Gray failure, shares drawn per seed: slow links (+5ms to 300ms per write), lossy links (1% to 20% of segments lost, each stalling the stream for a retransmission timeout, 200ms doubling to 3.2s), connections reset when a partition heals, slow machines (stalls of 2 to 50ms every 10 to 100ms), slow disks (fsync 10 to 100x slower). Slow links and disks stay slow in the recovery phase; the rest stop |
 
 **The store's contract** (`dstLogStore`, written down because raft's
 interfaces don't state one): every call is fsynced before it returns; each
@@ -100,7 +101,7 @@ storage engines (raft-wal), later.
   good; keeps the voter count by adding spares as non-voters and promoting
   them once caught up; random adds, promotions, demotions, removals (half
   the removed servers are decommissioned). It never voluntarily goes below
-  3 voters (see 6.4).
+  3 voters (see 6.5).
 
 ## 4. The checks
 
@@ -129,6 +130,7 @@ Default build (`go test -run TestDST`):
 | `TestDSTEverything` | 5 nodes, all of the above and pauses | 50 pass |
 | `TestDSTFourNodes` | 4 nodes, crashes, disk, partitions, network | 50 pass |
 | `TestDSTMembership` | 1/3/5/7 voters per seed, 3 spares, the operator, crashes, disk, partitions, network, losses | 200 pass |
+| `TestDSTGray` | 5 nodes, crashes, disk, partitions, network, pauses, gray failure; raft's default timeouts | 200 pass |
 | `TestDSTLogStoreContract` | one store through crashes against a model | 200 pass; catches `noSync` (159/200 seeds) and `splitBatches` (93/200) |
 | `TestDSTCatchesUnsyncedStore` | cluster on a store that skips fsync | caught (17/50) |
 | `TestDSTCatchesNaiveReadIndex` | ReadIndex without the barrier | caught (3/50) |
@@ -139,7 +141,9 @@ With `-tags dstbugs`:
 |---|---|
 | `TestDSTChecksCatchBugs` | vote-twice → one leader per term (9/50); skip-prev-log-term → same sequence (1/50); accept-stale-leader → linearizability (5/50) |
 | `TestDSTQuorumOffByOneScripted` | quorum-off-by-one loses writes along its one sequence, which needs amnesia: correct raft 20/20 pass, with the bug 10/20 fail |
-| `TestDSTStaleConfigStall` | the liveness bug in 6.1: correct raft stalls on 15/20 seeds; without the candidate checks all 20 recover |
+| `TestDSTStaleConfigStall` | the liveness bug in 6.1: correct raft stalls on 15/20 seeds; without the candidate checks, or with the proposed fix, all 20 recover |
+| `TestBootstrapCrash` | the bootstrap crash in 6.2: correct raft can't bootstrap again; with the fix it can |
+| `TestDSTMembershipGrayFixed` | the membership sweep under gray failure, with both proposed fixes on: 200 pass (correct raft fails 2 of 200, one per bug) |
 
 ## 6. Findings
 
@@ -149,12 +153,16 @@ Inside raft's fault model (one partition, one removal, one server lost for
 good), a cluster can end with a live majority of its voters and no leader,
 for good:
 
-1. Voters {A, B, C}, A leading. C is cut off.
-2. A adds a spare D as a non-voter and promotes it once caught up:
-   {A, B, C, D}, committed by A, B and D.
-3. A removes B: {A, C, D}, committed by A and D.
-4. A is lost for good. C and D are two of {A, C, D}'s three voters.
-5. C is reconnected; its latest configuration is still {A, B, C}.
+1. Voters {A, B, C}, A leading. C is cut off (by chance; unrelated to
+   what follows).
+2. Meanwhile A replaces B with a new server D, the usual way: add D as a
+   non-voter, promote it once caught up ({A, B, C, D}, committed by A, B
+   and D), then remove B ({A, C, D}, committed by A and D). C misses all
+   of it.
+3. A is lost for good. C and D are two of {A, C, D}'s three voters: D can
+   only win with C's vote.
+4. C is reconnected; its latest configuration is still {A, B, C}, without
+   D.
 
 D, the most up to date, asks C for a pre-vote; C logs `rejecting pre-vote
 request since node is not a voter` (D isn't one in C's stale
@@ -186,7 +194,30 @@ added for (#524); that the fix keeps that protection is argued, not
 measured. A scenario for #524 (a node that missed configuration changes,
 campaigning) belongs to phase 2.
 
-### 6.2 A demoted leader shuts down
+It also happens without a scripted partition: under gray failure
+(the membership sweep under gray failure, seed 175), a voter lagging behind lossy links kept
+a configuration without the candidate and rejected it (`node is not in
+configuration`) after the leader was lost. Both the fix and the checks
+removed recover that seed.
+
+### 6.2 A crash during BootstrapCluster leaves a node that can never lead
+
+`BootstrapCluster` saves term 1, then appends the configuration entry. If
+the node crashes between the two, on restart `HasExistingState` sees the
+term and says the node has state, so bootstrapping again fails with
+`ErrCantBootstrap`; and the node has no configuration, so it never
+campaigns. A single-voter cluster is stuck for good (and a multi-voter
+one has lost that voter) until someone wipes the node's data. The window
+is short (one write) and once per node, so low severity.
+
+Found by the gray sweep (seed 54: a slow disk widened the window, and the
+cluster's only voter crashed in it). `TestBootstrapCrash` shows it directly
+(a store whose StoreLog fails after the term was saved). Fix: write the
+configuration entry first, then the term (switch `bootstrap-log-first`): a
+crash between them leaves a log whose configuration raft uses on start;
+the seed recovers and the test passes. Not yet in the upstream draft.
+
+### 6.3 A demoted leader shuts down
 
 A leader that loses its vote, demoted as well as removed, steps down and,
 with `ShutdownOnRemove` (the default), shuts down (`raft.go`,
@@ -195,7 +226,7 @@ shutting down`. It stays in the configuration as a non-voter that no longer
 takes part. A follower that's demoted doesn't. Not a safety problem;
 possibly unintended.
 
-### 6.3 quorum-off-by-one (upstream 163a55f) is invisible inside raft's model
+### 6.4 quorum-off-by-one (upstream 163a55f) is invisible inside raft's model
 
 The bug computes the commit index as the median of the sorted match
 indexes rounded up, so an even configuration commits on half its voters (2
@@ -215,7 +246,7 @@ other holder's vote). A white-box check, "a leader never commits an entry
 before a majority stores it", would catch it in every run (open decision,
 10).
 
-### 6.4 Two voters is a hazard of single-server changes (not a bug)
+### 6.5 Two voters is a hazard of single-server changes (not a bug)
 
 With voters {A, B}, if A appends its own demotion or removal and fails
 before replicating it, A (a non-voter in its own latest configuration)
@@ -224,7 +255,7 @@ Raft's one-at-a-time changes. The sweep found it through the operator;
 the operator now keeps at least 3 voters, as autopilot's minimum quorum
 does.
 
-### 6.5 Earlier findings
+### 6.6 Earlier findings
 
 - **ReadIndex needs a barrier per term.** My first ReadIndex client read
   from a new leader's commit index before it committed an entry of its own
@@ -237,7 +268,7 @@ does.
   failed in 200 crash seeds and 73,292 committed writes. A store that could
   keep a later entry of a batch without an earlier one isn't tested.
 
-### 6.6 Mistakes of mine the sweeps caught
+### 6.7 Mistakes of mine the sweeps caught
 
 Worth knowing when reading results: the checks caught harness bugs as
 readily as raft ones.
@@ -249,6 +280,16 @@ readily as raft ones.
   voters; each stalled a cluster and looked at first like a raft bug.
 - I twice named the wrong cause of the stall in 6.1 before raft's own log
   showed the pre-vote path.
+
+### 6.8 Raft's timeouts must outlast a slow path (configuration, not a bug)
+
+On a fifth of raft's default timeouts (what the other sweeps use, for more
+elections per run), 6 of 200 gray seeds never elected a leader again: with
+slow links adding up to about 300ms per write, a round trip outlasts a
+200ms election timeout. All 6 recovered on raft's defaults (1s), and the
+gray sweeps use those. The same lesson appeared in go-dst-kit's own
+examples: three of them lose liveness under gray failure, by fixed
+timeouts shorter than a slow path.
 
 ## 7. The bug benchmark
 
@@ -298,9 +339,12 @@ tests and plain exploration are better.
 - Clients live in the servers and only use their own node; no forwarding,
   redirects or retries.
 - Clock skew is far below what raft should tolerate.
-- Latency is the same distribution on every link; no slow node, disk or
-  link; partitions hold traffic rather than dropping it.
-- Timeouts are fixed (defaults / 5), never raft's actual defaults.
+- Timeouts are fixed (defaults / 5, or the defaults in the gray sweeps),
+  never drawn.
+- Not measured: how often a message arrives after a term change (gray
+  failure makes it likely, but nothing counts it).
+- Membership under gray failure runs only with the proposed fixes on
+  (dstbugs build): the default suite has no membership-plus-gray sweep.
 - Several tests are caught on few seeds (skip-prev-log-term 1/50 in its
   test; the naive ReadIndex 3/50): stable, since seeds are fixed, but thin.
 
@@ -311,7 +355,7 @@ tests themselves (scenarios, assertions, checks); 3. how useful plain
 exploration is; 4. guided exploration. Phase 1 items:
 
 1. ~~Permanent loss and replacement through membership changes~~ (done)
-2. Slow and stale components (design below, building)
+2. ~~Slow and stale components~~ (done: design and what was built below)
 3. Snapshots on the simulated disk (`FileSnapshotStore`; dstmigrate must
    learn `os` file I/O), with crashes and errors
 4. Realistic clients on their own machines: leader discovery, forwarding,
@@ -325,7 +369,10 @@ Open decisions for Prince:
 - Add the white-box check "a leader never commits before a majority
   stores it" to the regular sweeps (it would catch quorum-off-by-one in
   every 4-node run)? Recommendation: in the sweeps, not the benchmark.
-- File the upstream issue for 6.1 ([draft](UPSTREAM-ISSUE-DRAFT.md))?
+- File the upstream issue for 6.1 ([draft](UPSTREAM-ISSUE-DRAFT.md))? And
+  6.2, in it or separately?
+- go-dst-kit's examples under gray failure: make their timeouts adaptive
+  and give each a gray sweep, or leave them?
 
 ### Item 2: slow and stale components (design)
 
@@ -346,6 +393,26 @@ do something (markers, and a test where it changes an outcome: e.g. a
 lossy link makes a leader step down, a long partition resets
 connections).
 
+**As built** (go-dst-kit `Faults.Gray`, local commit `60e196c`), where it
+differs from the design:
+
+- Long partitions: connections that crossed a partition are reset at the
+  heal with a per-seed chance, not by how long the partition lasted (a
+  middlebox forgetting the connection; simpler, and the held data is
+  still exact when it isn't reset).
+- Slow node: repeated short stalls (the machine paused for 2 to 50ms
+  every 10 to 100ms), not extra virtual time per step: it reuses pauses,
+  and it is what a starved CPU looks like from outside.
+- Slow disk: a per-machine fsync latency multiplier.
+- Slow links: both directions drawn independently (so sometimes one way).
+- Laws, each broken by hand once: `[links-per-seed]`, `[loss-delays]`,
+  `[heal-may-reset]` (simnet), `[gray-explores]` (dsttest).
+- Not shown: a test where a gray fault alone changes an outcome. Raft's
+  sweeps did show it (6.1's second shape, 6.2, 6.8).
+- In raft, one 200-seed `TestDSTGray` run exercised them: 6,353 stalls of
+  slow machines, 746 lost segments, 169 resets at heal, 138 slow links,
+  23 slow disks.
+
 ## 11. How to run
 
 The fork builds against a local go-dst-kit through a `go.work` (not
@@ -356,7 +423,8 @@ go test -run TestDST .                           # every sweep
 go test -run TestDSTMembership . -dst.seeds=200  # more seeds
 go test -run '^TestDSTMembership$' . -dst.seed=6 -dst.v   # replay one seed, with the event log
 DST_RAFT_LOG=1 go test -run ... -dst.seed=N .   # with raft's own log
-go test -tags dstbugs -run 'TestDSTChecksCatchBugs|TestDSTStaleConfigStall' -v .
+go test -tags dstbugs -run 'TestDSTChecksCatchBugs|TestDSTStaleConfigStall|TestBootstrapCrash|TestDSTMembershipGrayFixed' -v .
+DSTBUG=a,b go test -tags dstbugs ...             # several switches at once
 DSTBUG=vote-twice go test -tags dstbugs -run TestDSTPartitions .
 dstbench -seeds 100                              # the benchmark (go-dst-kit/cmd/dstbench)
 .dstmigrate/run.sh                               # re-run the migration from f9cf2a8

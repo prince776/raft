@@ -10,20 +10,22 @@ configuration**. When the receiver is behind, its latest configuration is
 stale, and it can reject the one candidate that could win. Combined with a
 lost server, this leaves a cluster with a live majority of its voters and
 no leader, permanently. The sequence uses only ordinary operations and
-faults: one partition, one `RemoveServer`, one server that never comes
-back.
+faults: one partition, one routine server replacement, one server that
+never comes back.
 
 ## Sequence
 
 Voters `{A, B, C}`, `A` leading, a new server `D`:
 
 1. `C` is partitioned from the others.
-2. `A`: `AddNonvoter(D)`; once `D` has caught up, `AddVoter(D)`.
-   Configuration `{A, B, C, D}`, committed by `A`, `B`, `D`.
-3. `A`: `RemoveServer(B)`. Configuration `{A, C, D}`, committed by `A`, `D`.
-4. `A` dies and doesn't come back. `C` and `D` are two of the three voters
-   of `{A, C, D}`.
-5. The partition heals. `C`'s latest configuration is still `{A, B, C}`.
+2. Meanwhile `B` is replaced by `D` (add the new server, then remove the
+   old): `AddNonvoter(D)`; once `D` has caught up, `AddVoter(D)`
+   (configuration `{A, B, C, D}`, committed by `A`, `B`, `D`); then
+   `RemoveServer(B)` (`{A, C, D}`, committed by `A`, `D`). `C` misses all of
+   it.
+3. `A` dies and doesn't come back. `C` and `D` are two of the three voters
+   of `{A, C, D}`, so `D` can only win with `C`'s vote.
+4. The partition heals. `C`'s latest configuration is still `{A, B, C}`.
 
 ## What happens
 
@@ -62,6 +64,11 @@ leader. Each seed replays exactly. We can also write a reproduction with
 raft's own test helpers (`MakeCluster`, partitions via `InmemTransport`
 disconnects) if that's more useful.
 
+It also happens without a scripted partition: in a randomized sweep with
+slow and lossy links, a voter that lagged behind kept a configuration
+without the candidate and rejected it (`rejecting pre-vote request since
+node is not in configuration`) after the leader was lost.
+
 Base: `dd4346d` (main as of 2026-11).
 
 ## Possible fix
@@ -93,6 +100,17 @@ not a measurement.
 
 ## Also noticed (separate)
 
+**A crash inside `BootstrapCluster` leaves a node that can never lead.**
+It saves term 1, then appends the configuration entry. After a crash
+between the two, `HasExistingState` reports state (the term), so
+bootstrapping again returns `ErrCantBootstrap`, and the node has no
+configuration, so it never campaigns; a single-node cluster needs its data
+wiped. Appending the configuration entry before saving the term closes
+the window (a crash between them leaves a log whose configuration raft
+uses on start). Low severity (one write, once per node); maybe a separate
+issue.
+
+**A demoted leader shuts down.**
 A leader that is demoted (`DemoteVoter`, not removed) steps down and, with
 `ShutdownOnRemove`, shuts down (`leaderLoop`: `!hasVote(committed,
 localID)` sets `stepDown`; log: `removed ourself, shutting down`), though

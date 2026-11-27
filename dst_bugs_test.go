@@ -3,6 +3,7 @@
 package raft
 
 import (
+	"errors"
 	"fmt"
 	"strings"
 	"testing"
@@ -213,4 +214,69 @@ func TestDSTStaleConfigStall(t *testing.T) {
 			t.Fatalf("with %s, %d of %d seeds still failed: %v", fix, len(rep.Failed), rep.Runs, rep.Failed[0].Err)
 		}
 	}
+}
+
+// failingLogs fails its first StoreLog: a crash after the call before it
+// (fsynced on return) and before this one.
+type failingLogs struct {
+	*InmemStore
+	failed bool
+}
+
+func (s *failingLogs) StoreLog(l *Log) error {
+	if !s.failed {
+		s.failed = true
+		return fmt.Errorf("crash")
+	}
+	return s.InmemStore.StoreLog(l)
+}
+
+// TestBootstrapCrash: BootstrapCluster saves term 1, then appends the
+// configuration entry. A crash between the two leaves a node that
+// HasExistingState says has state, so it can't bootstrap again, and that
+// has no configuration, so it can never elect anyone: a single-voter
+// cluster is stuck for good, and the node needs its data wiped. Found by
+// TestDSTMembershipGray (a slow disk widened the window).
+//
+// Fails if: correct raft can bootstrap again after that crash (no bug to
+// report), or with the fix (bootstrap-log-first: the configuration entry
+// first, then the term) it can't.
+func TestBootstrapCrash(t *testing.T) {
+	try := func() (again error, hasState bool) {
+		store := &failingLogs{InmemStore: NewInmemStore()}
+		conf := DefaultConfig()
+		conf.LocalID = "a"
+		_, trans := NewInmemTransport("a")
+		cfg := Configuration{Servers: []Server{{ID: "a", Address: trans.LocalAddr()}}}
+		if err := BootstrapCluster(conf, store, store.InmemStore, NewInmemSnapshotStore(), trans, cfg); err == nil {
+			t.Fatal("the injected crash didn't happen")
+		}
+		hasState, _ = HasExistingState(store, store.InmemStore, NewInmemSnapshotStore())
+		return BootstrapCluster(conf, store, store.InmemStore, NewInmemSnapshotStore(), trans, cfg), hasState
+	}
+	defer func() { activeBug = "" }()
+	activeBug = ""
+	if again, hasState := try(); !errors.Is(again, ErrCantBootstrap) || !hasState {
+		t.Fatalf("correct raft: bootstrapping again gave %v (has state %v); want ErrCantBootstrap", again, hasState)
+	}
+	activeBug = "bootstrap-log-first"
+	if again, hasState := try(); again != nil || hasState {
+		t.Fatalf("with bootstrap-log-first: bootstrapping again gave %v (has state %v); want success", again, hasState)
+	}
+}
+
+// TestDSTMembershipGrayFixed: the membership sweep under gray failure
+// (TestDSTMembershipGray), with both proposed fixes on. On correct raft it
+// fails on a few seeds (2 of 200 when written: one stale-configuration
+// stall, one bootstrap crash), so the default build can't carry it as a
+// regression sweep; with the fixes it must pass every seed, which also
+// shows those two are the only causes.
+//
+// Fails if: any seed fails with candidate-check-unless-ahead and
+// bootstrap-log-first both on.
+func TestDSTMembershipGrayFixed(t *testing.T) {
+	activeBug = "candidate-check-unless-ahead,bootstrap-log-first"
+	defer func() { activeBug = "" }()
+	dsttest.Run(t, dstOpts(dsttest.Faults{Crash: true, Disk: true, Partition: true, Network: true, Loss: true, Gray: true}),
+		func(h *dsttest.Harness) { membershipClusterWith(h, true) })
 }

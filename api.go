@@ -270,8 +270,10 @@ func BootstrapCluster(conf *Config, logs LogStore, stable StableStore,
 	}
 
 	// Set current term to 1.
-	if err := stable.SetUint64(keyCurrentTerm, 1); err != nil {
-		return fmt.Errorf("failed to save current term: %v", err)
+	if !bug("bootstrap-log-first") {
+		if err := stable.SetUint64(keyCurrentTerm, 1); err != nil {
+			return fmt.Errorf("failed to save current term: %v", err)
+		}
 	}
 
 	// Append configuration entry to log.
@@ -288,6 +290,11 @@ func BootstrapCluster(conf *Config, logs LogStore, stable StableStore,
 	}
 	if err := logs.StoreLog(entry); err != nil {
 		return fmt.Errorf("failed to append configuration entry to log: %v", err)
+	}
+	if bug("bootstrap-log-first") {
+		if err := stable.SetUint64(keyCurrentTerm, 1); err != nil {
+			return fmt.Errorf("failed to save current term: %v", err)
+		}
 	}
 
 	return nil
