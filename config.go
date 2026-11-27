@@ -258,6 +258,10 @@ type Config struct {
 	// skipStartup allows NewRaft() to bypass all background work goroutines
 	skipStartup bool
 
+	// dstOnVote, if set (simulation tests), is told of every vote raft
+	// grants: the term and the candidate (its encoded address).
+	dstOnVote func(term uint64, candidate []byte)
+
 	// World is the World raft runs in (go-dst-kit): its goroutines, timers,
 	// clock, channels and randomness. Nil is the real World; a simulated
 	// World makes a run deterministic, for simulation tests.

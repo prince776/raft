@@ -240,3 +240,31 @@ returned nothing, raft started without a snapshot and found no entry 1).
 
 Also: `NewFileSnapshotStoreWithLogger` wraps errors with `%v`, so callers
 can't detect, say, a full disk with `errors.Is(err, syscall.ENOSPC)`.
+
+---
+
+<!-- FOURTH DRAFT: a comment on #695, not a new issue. Not posted; Prince decides. -->
+
+# Comment on #695: the same race sets the term back when it meets the node's own election
+
+A deterministic simulation (go-dst-kit, with a check that a node's current
+term never decreases) hits a variant of the alternate manifestation on
+about 5% of seeds with crashes, partitions and slow links, each seed
+replaying exactly:
+
+1. Node n3 is a candidate in term 2 (its pre-vote won); the term-2 leader's
+   heartbeat reaches its transport goroutine and passes the "older term?"
+   check in `appendEntries`.
+2. n3's main loop runs `electSelf`: `setCurrentTerm(3)` (persisted), votes
+   for itself in term 3.
+3. The heartbeat goroutine resumes: the node isn't a follower, so it runs
+   `setState(Follower); setCurrentTerm(2)`. The term goes back to 2, in
+   the stable store too. (In one seed it went from 28 to 21: the heartbeat
+   had waited behind slow, failing disk writes.)
+
+Note on #701's approach: a mutex around `appendEntries`'s step-down
+doesn't cover this, since `electSelf` (and `requestVote`) change the term
+on the main loop without it. Handing any heartbeat that would change the
+term or the state to the main loop (`rpcCh`), as suggested above, fixes
+every seed we have; the fast path keeps handling the common heartbeat
+(same term, follower).

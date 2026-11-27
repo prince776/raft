@@ -423,6 +423,40 @@ filesystem: two snapshots, a log compacted past the older, the newest's
 `%v`, so callers can't tell a full disk (`errors.Is(err,
 syscall.ENOSPC)`) from other failures.
 
+### 6.13 A heartbeat on the transport's goroutine sets the term back (safety; upstream #695)
+
+Found by phase 2's "terms never go back" invariant, in ordinary sweeps:
+13 of 250 seeds of the five default sweeps (Smoke, Everything,
+Membership, Gray, DiskErrors at 50 each), each replaying exactly.
+
+`processHeartbeat` runs `appendEntries` on the transport's connection
+goroutine (the heartbeat fast path), though `appendEntries` "must only be
+called from the main thread". Gray seed 49: n3, a candidate in term 2,
+gets a heartbeat from the term-2 leader; the heartbeat passes the "older
+term?" check; raft's main loop starts the election (`electSelf`: term 3,
+persisted, n3 votes for itself); then the heartbeat goroutine, seeing a
+non-follower, runs `setState(Follower); setCurrentTerm(2)`. The current
+term goes back from 3 to 2, on disk too (DiskErrors seed 19: from 28 to
+21, the heartbeat having waited behind failing disk writes). Only atomics
+are touched, so `-race` can't see it.
+
+This is the "alternate manifestation" of Antithesis's
+[#695](https://github.com/hashicorp/raft/issues/695) (open): there a
+heartbeat races a RequestVote; here it races the node's own election.
+Its main manifestation (a leader appending under a term it doesn't lead,
+logs diverging) wasn't seen: "logs match" holds on every seed. The fix
+proposed in [#701](https://github.com/hashicorp/raft/pull/701) (closed
+unmerged) serializes `appendEntries`'s step-down with a mutex; the main
+loop's own term changes (`electSelf`, `requestVote`) don't take it, so
+this variant would remain.
+
+Fix (switch `heartbeat-on-main-thread`, as #695's reporter suggested): a
+heartbeat that would change the term or the state is handed to the main
+loop (`rpcCh`) instead of handled on the transport's goroutine. All six
+seeds examined pass with it; with every known fix on, the term check is
+strict (below). Not yet shown outside the simulation (it needs the
+interleaving; a scripted test is a todo).
+
 ## 7. The bug benchmark
 
 `dstbench.json`: bugs behind switches (`bug(name)` in `dstbugs*.go`, only
@@ -506,7 +540,7 @@ a gap:
 
 | Report | Bug | Why we miss it today | Needed |
 |---|---|---|---|
-| [#695](https://github.com/hashicorp/raft/issues/695) | Heartbeats handled on the transport goroutine bump the term concurrently with the leader loop: logs diverge (safety) | Our checks would see divergence; the interleaving is rare under seed sweeps | Phase 2: Raft's invariants checked every step (Log Matching, Leader Completeness); phase 3-4: exploration |
+| [#695](https://github.com/hashicorp/raft/issues/695) | Heartbeats handled on the transport goroutine bump the term concurrently with the leader loop: logs diverge (safety) | **Found in phase 2** (6.13): "terms never go back" catches its alternate manifestation on 13 of 250 default seeds; divergence itself not seen yet | Phase 3-4: exploration for the divergence |
 | [#696](https://github.com/hashicorp/raft/issues/696) | An interrupted leadership transfer leaves "leadership transfer in progress" set: the re-elected leader refuses writes (liveness) | The workload never transfers leadership | Phase 2: leadership transfers in the workload |
 | [#697](https://github.com/hashicorp/raft/issues/697) | InstallSnapshot keeps a conflicting log suffix (Figure 13 rule 7): a follower loops on snapshots (liveness) | "The cluster recovers" only needs the leader to commit; "same sequence" accepts a follower stuck on a prefix | Phase 2: every node converges after the faults; phase 1 item 3: snapshots on the simulated disk |
 | [#746](https://github.com/hashicorp/raft/issues/746) | `persistVote` writes term and candidate as two writes; a crash between them lets a stale vote skip the log check (safety) | Needs pre-vote off; our config never turns it off | Phase 1 item 7: draw the configuration per seed (pre-vote on or off); the crash class is the one that found 6.2 |
@@ -712,6 +746,33 @@ differs from the design:
 - In raft, one 200-seed `TestDSTGray` run exercised them: 6,353 stalls of
   slow machines, 746 lost segments, 169 resets at heal, 138 slow links,
   23 slow disks.
+
+## 10a. Phase 2: checks (in progress)
+
+Approved order: Raft's core invariants; convergence after the faults;
+leadership transfers (#696); a removed server campaigning (#524); later,
+a manual-recovery operator and a planted lease read.
+
+### Step 1: Raft's core invariants (as built)
+
+`dst_invariants_test.go`, four checks after every step, each with a bug
+planted for it (`TestDSTChecksCatchBugs`, caught within 10–30 seeds):
+
+| Check | How | Planted bug that breaks it |
+|---|---|---|
+| logs match | as each store writes: (index, term) maps to one payload and one previous term, so two logs holding an entry agree on all before it | `skip-prev-log-term` |
+| leaders hold every committed entry | when a node is first seen leading a term, against every entry a leader committed (a snapshot covers what it compacted) | `vote-ignores-log` |
+| terms never go back | a node's current term, across crashes and restarts | `forget-term-on-restart` (new) |
+| one vote per term | a hook in raft's vote grants (`Config.dstOnVote`, its own vote included), across restarts | `vote-twice` |
+
+They now catch first what the end-to-end checks caught before
+(`vote-twice` by a second vote before a second leader, `accept-stale-leader`
+by a leader missing a committed entry). A node that lost its disk
+(`wipeOnBoot`) starts afresh in the last two. "Terms never go back" found
+6.13 at once; since upstream breaks it, it fails a run only with that fix
+on (`knownFixes`), and counts the regressions otherwise
+(`a node's term went back (6.13)`). Cost: small (the default sweeps' speed
+is unchanged within noise).
 
 ## 11. How to run
 

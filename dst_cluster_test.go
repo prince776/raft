@@ -133,6 +133,7 @@ type simCluster struct {
 	kv    *kvWorkload
 	op    *operator  // nil unless spec.operator
 	knobs *raftKnobs // the drawn configuration (nil unless spec.drawConfig)
+	inv   *invariants
 }
 
 // dstNode is one machine. Its log and stable store live in a file on its
@@ -225,7 +226,9 @@ func newCluster(h *dsttest.Harness, spec clusterSpec) *simCluster {
 	// disk errors that is the process dying, restarted by its supervisor.
 	// Only disk-error panics: any other panic is still a failure.
 	h.OnPanic(func(v any) bool { return diskError(fmt.Errorf("%v", v)) })
+	c.inv = newInvariants()
 	c.checks()
+	c.invariantChecks()
 	return c
 }
 
@@ -245,6 +248,7 @@ func (c *simCluster) boot(nd *dstNode, w *dst.World, initial []Server) {
 			return
 		}
 		h.Sometimes("a node lost its disk")
+		c.inv.forget(nd.name)
 	}
 	// Startup steps that hit the disk retry on a disk error (Faults.
 	// DiskErrors: a full disk or EIO passes), as a supervised service does.
@@ -266,6 +270,7 @@ func (c *simCluster) boot(nd *dstNode, w *dst.World, initial []Server) {
 	if !retry("open the log store", func() (err error) { logs, err = openDSTLogStore(w.FS(), "raft.log"); return err }) {
 		return
 	}
+	logs.onStore = func(s *dstLogStore, l []*Log) { c.inv.stored(nd.name, s, l) }
 	logs.noSync, logs.splitBatches = c.spec.scenario.noSync, c.spec.scenario.splitBatches
 	nd.logs = logs
 	stream, err := newDSTStream(w, string(nd.addr()))
@@ -314,6 +319,7 @@ func (c *simCluster) boot(nd *dstNode, w *dst.World, initial []Server) {
 	// "failed to load any existing snapshots" without the cause, so that
 	// message retries too (a snapshot that is really corrupt never loads,
 	// and the run fails its liveness checks instead).
+	conf.dstOnVote = func(term uint64, cand []byte) { c.inv.voted(nd.name, term, cand) }
 	var r *Raft
 	if !retry("start raft", func() (err error) {
 		r, err = NewRaft(conf, nd.fsm, nd.logs, nd.logs, nd.snaps, trans)

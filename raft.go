@@ -1707,7 +1707,7 @@ func (r *Raft) processHeartbeat(rpc RPC) {
 	// Ensure we are only handling a heartbeat
 	switch cmd := rpc.Command.(type) {
 	case *AppendEntriesRequest:
-		r.appendEntries(rpc, cmd)
+		r.appendEntriesOn(rpc, cmd, true)
 	default:
 		r.logger.Error("expected heartbeat, got", "command", hclog.Fmt("%#v", rpc.Command))
 		rpc.Respond(nil, fmt.Errorf("unexpected command"))
@@ -1716,8 +1716,13 @@ func (r *Raft) processHeartbeat(rpc RPC) {
 
 // appendEntries is invoked when we get an append entries RPC call. This must
 // only be called from the main thread.
-func (r *Raft) appendEntries(rpc RPC, a *AppendEntriesRequest) {
+func (r *Raft) appendEntries(rpc RPC, a *AppendEntriesRequest) { r.appendEntriesOn(rpc, a, false) }
+
+// appendEntriesOn: heartbeat is set on processHeartbeat's fast path (not
+// the main thread).
+func (r *Raft) appendEntriesOn(rpc RPC, a *AppendEntriesRequest, heartbeat bool) {
 	defer metrics.MeasureSince([]string{"raft", "rpc", "appendEntries"}, r.w.Now())
+	forwarded := false
 	// Setup a response
 	resp := &AppendEntriesResponse{
 		RPCHeader:      r.getRPCHeader(),
@@ -1728,7 +1733,9 @@ func (r *Raft) appendEntries(rpc RPC, a *AppendEntriesRequest) {
 	}
 	var rpcErr error
 	defer func() {
-		rpc.Respond(resp, rpcErr)
+		if !forwarded {
+			rpc.Respond(resp, rpcErr)
+		}
 	}()
 
 	// Ignore an older term
@@ -1739,6 +1746,12 @@ func (r *Raft) appendEntries(rpc RPC, a *AppendEntriesRequest) {
 	// Increase the term if we see a newer one, also transition to follower
 	// if we ever get an appendEntries call
 	if a.Term > r.getCurrentTerm() || (r.getState() != Follower && !r.candidateFromLeadershipTransfer.Load()) {
+		if heartbeat && bug("heartbeat-on-main-thread") {
+			// Changing the term or the state is the main loop's job.
+			forwarded = true
+			r.rpcCh.Send(rpc)
+			return
+		}
 		// Ensure transition to follower
 		r.setState(Follower)
 		r.setCurrentTerm(a.Term)
@@ -1991,6 +2004,7 @@ func (r *Raft) requestVote(rpc RPC, req *RequestVoteRequest) {
 		if bytes.Equal(lastVoteCandBytes, candidateBytes) {
 			r.logger.Warn("duplicate requestVote from", "candidate", candidate)
 			resp.Granted = true
+			r.dstVoted(req.Term, candidateBytes)
 		}
 		return
 	}
@@ -2020,6 +2034,7 @@ func (r *Raft) requestVote(rpc RPC, req *RequestVoteRequest) {
 	}
 
 	resp.Granted = true
+	r.dstVoted(req.Term, candidateBytes)
 	r.setLastContact()
 }
 
@@ -2329,6 +2344,7 @@ func (r *Raft) electSelf() dst.Chan[*voteResult] {
 					return (dst.Chan[*voteResult]{})
 
 				}
+				r.dstVoted(req.Term, req.Addr)
 				// Include our own vote
 				respCh.Send(&voteResult{
 					RequestVoteResponse: RequestVoteResponse{

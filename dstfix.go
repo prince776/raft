@@ -34,3 +34,11 @@ func (r *Raft) logFollows(index uint64) bool {
 	}
 	return last <= index || first <= index+1
 }
+
+// dstVoted tells the simulation's "one vote per term" check of a vote raft
+// granted (Config.dstOnVote; nil outside simulation tests).
+func (r *Raft) dstVoted(term uint64, candidate []byte) {
+	if f := r.config().dstOnVote; f != nil {
+		f(term, candidate)
+	}
+}

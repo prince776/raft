@@ -479,3 +479,76 @@ edit('api.go', lambda s: s.replace('''	// Scan through the log for any configura
 		first, _ := r.logs.FirstIndex()
 		return nil, fmt.Errorf("the log starts at %d, past the restored snapshot's index %d: a later snapshot couldn't be read", first, snapshotIndex)
 	}''', 1))
+
+# Phase 2: a white-box hook for the "one vote per term" check. raft calls
+# Config.dstOnVote (nil outside the simulation) whenever it grants a vote,
+# its own included, after persisting it.
+edit('config.go', lambda s: s.replace('''	// skipStartup allows NewRaft() to bypass all background work goroutines
+	skipStartup bool''', '''	// skipStartup allows NewRaft() to bypass all background work goroutines
+	skipStartup bool
+
+	// dstOnVote, if set (simulation tests), is told of every vote raft
+	// grants: the term and the candidate (its encoded address).
+	dstOnVote func(term uint64, candidate []byte)''', 1))
+edit('raft.go', in_func('func (r *Raft) requestVote(', '''			r.logger.Warn("duplicate requestVote from", "candidate", candidate)
+			resp.Granted = true''', '''			r.logger.Warn("duplicate requestVote from", "candidate", candidate)
+			resp.Granted = true
+			r.dstVoted(req.Term, candidateBytes)'''))
+edit('raft.go', in_func('func (r *Raft) requestVote(', '''	resp.Granted = true
+	r.setLastContact()''', '''	resp.Granted = true
+	r.dstVoted(req.Term, candidateBytes)
+	r.setLastContact()'''))
+edit('raft.go', in_func('func (r *Raft) electSelf(', '''				if err := r.persistVote(req.Term, req.Addr); err != nil {
+					r.logger.Error("failed to persist vote", "error", err)
+					return (dst.Chan[*voteResult]{})
+
+				}''', '''				if err := r.persistVote(req.Term, req.Addr); err != nil {
+					r.logger.Error("failed to persist vote", "error", err)
+					return (dst.Chan[*voteResult]{})
+
+				}
+				r.dstVoted(req.Term, req.Addr)'''))
+# Bug for "terms never go back": a restarted node forgets its term.
+edit('api.go', in_func('func NewRaft(', '''	currentTerm, err := stable.GetUint64(keyCurrentTerm)''', '''	currentTerm, err := stable.GetUint64(keyCurrentTerm)
+	if bug("forget-term-on-restart") {
+		currentTerm = 0
+	}'''))
+
+# Experimental fix (DST.md 6.13): processHeartbeat runs appendEntries on
+# the transport's connection goroutine, concurrently with the main loop,
+# though appendEntries "must only be called from the main thread". A
+# heartbeat that passed the term check while the main loop moved to a new
+# term (electSelf) then steps the node down to the heartbeat's older term:
+# the current term goes back, on disk too. With the fix, a heartbeat that
+# would change the term or the state goes to the main loop instead.
+edit('raft.go', lambda s: s.replace('''	case *AppendEntriesRequest:
+		r.appendEntries(rpc, cmd)
+	default:
+		r.logger.Error("expected heartbeat, got"''', '''	case *AppendEntriesRequest:
+		r.appendEntriesOn(rpc, cmd, true)
+	default:
+		r.logger.Error("expected heartbeat, got"''', 1))
+edit('raft.go', lambda s: s.replace('''func (r *Raft) appendEntries(rpc RPC, a *AppendEntriesRequest) {
+	defer metrics.MeasureSince([]string{"raft", "rpc", "appendEntries"}, r.w.Now())''', '''func (r *Raft) appendEntries(rpc RPC, a *AppendEntriesRequest) { r.appendEntriesOn(rpc, a, false) }
+
+// appendEntriesOn: heartbeat is set on processHeartbeat's fast path (not
+// the main thread).
+func (r *Raft) appendEntriesOn(rpc RPC, a *AppendEntriesRequest, heartbeat bool) {
+	defer metrics.MeasureSince([]string{"raft", "rpc", "appendEntries"}, r.w.Now())
+	forwarded := false''', 1))
+edit('raft.go', in_func('func (r *Raft) appendEntriesOn(', '''	defer func() {
+		rpc.Respond(resp, rpcErr)
+	}()''', '''	defer func() {
+		if !forwarded {
+			rpc.Respond(resp, rpcErr)
+		}
+	}()'''))
+edit('raft.go', in_func('func (r *Raft) appendEntriesOn(', '''	if a.Term > r.getCurrentTerm() || (r.getState() != Follower && !r.candidateFromLeadershipTransfer.Load()) {
+		// Ensure transition to follower''', '''	if a.Term > r.getCurrentTerm() || (r.getState() != Follower && !r.candidateFromLeadershipTransfer.Load()) {
+		if heartbeat && bug("heartbeat-on-main-thread") {
+			// Changing the term or the state is the main loop's job.
+			forwarded = true
+			r.rpcCh.Send(rpc)
+			return
+		}
+		// Ensure transition to follower'''))

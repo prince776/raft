@@ -33,9 +33,13 @@ func TestDSTChecksCatchBugs(t *testing.T) {
 		faults dsttest.Faults
 		nodes  int
 	}{
-		{"vote-twice", []string{"at most one leader per term"}, dsttest.Faults{Crash: true, Disk: true, Partition: true, Network: true}, 4},
-		{"skip-prev-log-term", []string{"the nodes applied the same sequence"}, dsttest.Faults{Crash: true, Disk: true, Partition: true, Network: true, Pause: true}, 5},
-		{"accept-stale-leader", []string{"the clients' history is linearizable", "acknowledged writes survive", "the nodes applied the same sequence"},
+		// One vote per term sees a second vote before a second leader.
+		{"vote-twice", []string{"one vote per term"}, dsttest.Faults{Crash: true, Disk: true, Partition: true, Network: true}, 4},
+		{"skip-prev-log-term", []string{"logs match"}, dsttest.Faults{Crash: true, Disk: true, Partition: true, Network: true, Pause: true}, 5},
+		{"vote-ignores-log", []string{"leaders hold every committed entry"}, dsttest.Faults{Crash: true, Disk: true, Partition: true, Network: true}, 5},
+		// The term check is strict only with 6.13's fix on.
+		{"forget-term-on-restart,heartbeat-on-main-thread", []string{"terms never go back"}, dsttest.Faults{Crash: true, Disk: true}, 3},
+		{"accept-stale-leader", []string{"leaders hold every committed entry", "the clients' history is linearizable", "acknowledged writes survive", "the nodes applied the same sequence"},
 			dsttest.Faults{Partition: true, Network: true}, 3},
 	} {
 		t.Run(c.bug, func(t *testing.T) {
@@ -43,13 +47,16 @@ func TestDSTChecksCatchBugs(t *testing.T) {
 			defer func() { activeBug = "" }()
 			// Ten seeds at a time, stopping once a check meant for the bug
 			// caught it (most do within the first ten): up to 50 seeds.
-			caught, failed, runs := map[string]int{}, 0, 0
+			caught, failed, runs, firstErr := map[string]int{}, 0, 0, error(nil)
 			for first := uint64(1); first <= 50 && len(caught) == 0; first += 10 {
 				o := dstOpts(c.faults)
 				o.FirstSeed, o.Seeds, o.KeepGoing, o.DeterminismChecks = first, 10, true, -1
 				rep := dsttest.Sweep(o, func(h *dsttest.Harness) { dstCluster(h, c.nodes) })
 				failed, runs = failed+len(rep.Failed), runs+rep.Runs
 				for _, r := range rep.Failed {
+					if firstErr == nil {
+						firstErr = r.Err
+					}
 					for _, check := range c.checks {
 						if strings.Contains(r.Err.Error(), `"`+check+`"`) {
 							caught[check]++
@@ -58,7 +65,7 @@ func TestDSTChecksCatchBugs(t *testing.T) {
 				}
 			}
 			if len(caught) == 0 {
-				t.Fatalf("%d of %d seeds failed, none by %q", failed, runs, c.checks)
+				t.Fatalf("%d of %d seeds failed, none by %q; the first: %.300v", failed, runs, c.checks, firstErr)
 			}
 			t.Logf("%d of %d seeds failed; caught by %v", failed, runs, caught)
 		})
@@ -310,7 +317,7 @@ func TestDSTDiskErrorsFixed(t *testing.T) {
 }
 
 // knownFixes are the proposed fixes for the raft bugs found so far.
-const knownFixes = "candidate-check-unless-ahead,bootstrap-log-first,snapshot-boundary-fix,snapshot-fallback-needs-log"
+const knownFixes = "candidate-check-unless-ahead,bootstrap-log-first,snapshot-boundary-fix,snapshot-fallback-needs-log,heartbeat-on-main-thread"
 
 // TestDSTMembershipFixed: the membership sweep with servers lost for good
 // and replaced, with the proposed fixes on. Correct raft stalls on some

@@ -57,6 +57,9 @@ type dstLogStore struct {
 
 	noSync, splitBatches bool
 	dirty                bool // a failed write may have left bytes after off
+	// onStore, if set, is told of entries after a write stores them (not
+	// when opening replays them): the Log Matching check.
+	onStore func(s *dstLogStore, logs []*Log)
 }
 
 // storeOp is one record: a change to the store.
@@ -182,6 +185,9 @@ func (s *dstLogStore) write(op storeOp) error {
 	}
 	s.off += int64(len(rec))
 	s.apply(op)
+	if s.onStore != nil && len(op.Logs) > 0 {
+		s.onStore(s, op.Logs)
+	}
 	return nil
 }
 
