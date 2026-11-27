@@ -1589,6 +1589,9 @@ func (r *Raft) processLogs(index uint64, futures map[uint64]*logFuture) {
 			// If we have a log ready to send to the FSM add it to the batch.
 			// The FSM thread will respond to the future.
 			batch = append(batch, preparedLog)
+			if bug("apply-entry-twice") && idx%50 == 0 {
+				batch = append(batch, preparedLog)
+			}
 
 			// If we have filled up a batch, send it to the FSM
 			if len(batch) >= maxAppendEntries {
@@ -1753,8 +1756,11 @@ func (r *Raft) appendEntries(rpc RPC, a *AppendEntriesRequest) {
 		lastIdx, lastTerm := r.getLastEntry()
 
 		var prevLogTerm uint64
+		snapIdx, _ := r.getLastSnapshot()
 		if a.PrevLogEntry == lastIdx {
 			prevLogTerm = lastTerm
+		} else if bug("snapshot-boundary-fix") && a.PrevLogEntry <= snapIdx {
+			prevLogTerm = a.PrevLogTerm // committed: the leader's entry is ours
 		} else {
 			var prevLog Log
 			if err := r.logs.GetLog(a.PrevLogEntry, &prevLog); err != nil {
@@ -1783,8 +1789,12 @@ func (r *Raft) appendEntries(rpc RPC, a *AppendEntriesRequest) {
 
 		// Delete any conflicting entries, skip any duplicates
 		lastLogIdx, _ := r.getLastLog()
+		snapshotIdx, _ := r.getLastSnapshot()
 		var newEntries []*Log
 		for i, entry := range a.Entries {
+			if bug("snapshot-boundary-fix") && entry.Index <= snapshotIdx {
+				continue // committed, and in our snapshot
+			}
 			if entry.Index > lastLogIdx {
 				newEntries = a.Entries[i:]
 				break
@@ -2148,6 +2158,12 @@ func (r *Raft) installSnapshot(rpc RPC, req *InstallSnapshotRequest) {
 			return
 		}
 		reqConfigurationIndex = req.LastLogIndex
+	}
+	if bug("snapshot-boundary-fix") && r.holdsEntry(req.LastLogIndex, req.LastLogTerm) {
+		// Figure 13, rule 6: we hold the snapshot's last entry, so we
+		// continue from it without installing.
+		resp.Success = true
+		return
 	}
 	version := getSnapshotVersion(r.protocolVersion)
 	sink, err := r.snapshots.Create(version, req.LastLogIndex, req.LastLogTerm,

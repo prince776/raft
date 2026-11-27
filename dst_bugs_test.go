@@ -265,18 +265,74 @@ func TestBootstrapCrash(t *testing.T) {
 	}
 }
 
-// TestDSTMembershipGrayFixed: the membership sweep under gray failure
-// (TestDSTMembershipGray), with both proposed fixes on. On correct raft it
-// fails on a few seeds (2 of 200 when written: one stale-configuration
-// stall, one bootstrap crash), so the default build can't carry it as a
-// regression sweep; with the fixes it must pass every seed, which also
-// shows those two are the only causes.
+// TestDSTMembershipGrayFixed: the membership sweep under gray failure,
+// with the proposed fixes on: the stale-configuration stall (6.1), the
+// bootstrap crash (6.2) and the snapshot boundary (6.11, here with
+// TrailingLogs 4). On correct raft it fails on a few seeds, so the default
+// build can't carry it as a regression sweep; with the fixes it must pass
+// every seed, which also shows those are the only causes.
 //
 // Fails if: any seed fails with candidate-check-unless-ahead and
 // bootstrap-log-first both on.
 func TestDSTMembershipGrayFixed(t *testing.T) {
-	activeBug = "candidate-check-unless-ahead,bootstrap-log-first"
+	activeBug = "candidate-check-unless-ahead,bootstrap-log-first,snapshot-boundary-fix"
 	defer func() { activeBug = "" }()
 	dsttest.Run(t, dstOpts(dsttest.Faults{Crash: true, Disk: true, Partition: true, Network: true, Loss: true, Gray: true}),
 		func(h *dsttest.Harness) { membershipClusterWith(h, true) })
+}
+
+// TestDSTSnapshotBoundary: with TrailingLogs 0 a follower's snapshot
+// leaves its log holding only entries past it, and raft then mishandles
+// the boundary (DST.md 6.11): an append following the follower's snapshot
+// index fails, the leader backs off and sends an older snapshot, the
+// follower installs it (its applied state goes backwards), loops on
+// snapshot installs, and panics with "log not found". The fix
+// (snapshot-boundary-fix): a previous entry at or below the follower's
+// snapshot is committed, so it matches; entries there are skipped; an
+// older snapshot is acknowledged without being installed.
+//
+// Fails if: correct raft passes every seed (nothing left to show), or any
+// seed fails with the fix.
+func TestDSTSnapshotBoundary(t *testing.T) {
+	defer func() { activeBug = "" }()
+	sweep := func(bug string) dsttest.Report {
+		activeBug = bug
+		o := dstOpts(dsttest.Faults{Crash: true, Disk: true, Partition: true, Network: true, Pause: true})
+		o.Seeds, o.KeepGoing, o.DeterminismChecks = 400, true, -1
+		return dsttest.Sweep(o, func(h *dsttest.Harness) {
+			newCluster(h, clusterSpec{voters: 5, drawConfig: true, forceTrailing: true, forceTrailingLogs: 0})
+		})
+	}
+	if rep := sweep(""); len(rep.Failed) == 0 {
+		t.Errorf("correct raft passed all %d seeds with TrailingLogs 0", rep.Runs)
+	} else {
+		t.Logf("correct raft: %d of %d seeds failed, first: %v", len(rep.Failed), rep.Runs, rep.Failed[0].Err)
+	}
+	if rep := sweep("snapshot-boundary-fix"); len(rep.Failed) > 0 {
+		t.Errorf("with the fix, %d of %d seeds failed: %v", len(rep.Failed), rep.Runs, rep.Failed[0].Err)
+	}
+}
+
+// TestDSTCatchesEntryAppliedTwice: the FSM's check that it sees each log
+// index once, in order. Clients' retries are deduplicated by ID, so a raft
+// that hands the FSM an entry twice would otherwise look like a retry.
+//
+// Fails if: with the bug (every 50th entry handed to the FSM twice), no
+// seed fails by that check.
+func TestDSTCatchesEntryAppliedTwice(t *testing.T) {
+	activeBug = "apply-entry-twice"
+	defer func() { activeBug = "" }()
+	o := dstOpts(dsttest.Faults{})
+	o.Seeds, o.KeepGoing, o.DeterminismChecks = 20, true, -1
+	rep := dsttest.Sweep(o, func(h *dsttest.Harness) { sweepCluster(h, 3) })
+	caught := 0
+	for _, r := range rep.Failed {
+		if strings.Contains(r.Err.Error(), "an entry applied twice or out of order") {
+			caught++
+		}
+	}
+	if caught == 0 {
+		t.Fatalf("%d of %d seeds failed, none by the FSM's index check", len(rep.Failed), rep.Runs)
+	}
+	t.Logf("caught on %d of %d seeds", caught, rep.Runs)
 }

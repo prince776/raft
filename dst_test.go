@@ -16,14 +16,14 @@ func dstOpts(f dsttest.Faults) dsttest.Options {
 
 // TestDSTSmoke: three nodes, scheduling only.
 func TestDSTSmoke(t *testing.T) {
-	dsttest.Run(t, dstOpts(dsttest.Faults{}), func(h *dsttest.Harness) { dstCluster(h, 3) })
+	dsttest.Run(t, dstOpts(dsttest.Faults{}), func(h *dsttest.Harness) { sweepCluster(h, 3) })
 }
 
 // TestDSTCrashes: nodes crash and restart; their disks lose what wasn't
 // fsynced, tear writes and lose power mid-call.
 func TestDSTCrashes(t *testing.T) {
 	dsttest.Run(t, dstOpts(dsttest.Faults{Crash: true, Disk: true}), func(h *dsttest.Harness) {
-		dstCluster(h, 3)
+		sweepCluster(h, 3)
 		h.Expect("an FSM was restored from a snapshot")
 	})
 }
@@ -31,21 +31,21 @@ func TestDSTCrashes(t *testing.T) {
 // TestDSTPartitions: the network partitions (sometimes one way), with
 // latency spikes and connection resets.
 func TestDSTPartitions(t *testing.T) {
-	dsttest.Run(t, dstOpts(dsttest.Faults{Partition: true, Network: true}), func(h *dsttest.Harness) { dstCluster(h, 3) })
+	dsttest.Run(t, dstOpts(dsttest.Faults{Partition: true, Network: true}), func(h *dsttest.Harness) { sweepCluster(h, 3) })
 }
 
 // TestDSTEverything: crashes, disk faults, partitions, pauses and network
 // faults at once, five nodes.
 func TestDSTEverything(t *testing.T) {
 	dsttest.Run(t, dstOpts(dsttest.Faults{Crash: true, Disk: true, Partition: true, Network: true, Pause: true}),
-		func(h *dsttest.Harness) { dstCluster(h, 5) })
+		func(h *dsttest.Harness) { sweepCluster(h, 5) })
 }
 
 // TestDSTFourNodes: an even-sized cluster (its quorum is 3 of 4, not
 // half), with crashes and partitions.
 func TestDSTFourNodes(t *testing.T) {
 	dsttest.Run(t, dstOpts(dsttest.Faults{Crash: true, Disk: true, Partition: true, Network: true}),
-		func(h *dsttest.Harness) { dstCluster(h, 4) })
+		func(h *dsttest.Harness) { sweepCluster(h, 4) })
 }
 
 // membershipCluster is a cluster whose size is drawn per seed (1, 3, 5
@@ -55,7 +55,7 @@ func membershipCluster(h *dsttest.Harness) *simCluster { return membershipCluste
 
 func membershipClusterWith(h *dsttest.Harness, defaultTimeouts bool) *simCluster {
 	voters := []int{1, 3, 5, 7}[h.World().Rand().Stream("cluster size").IntN(4)]
-	c := newCluster(h, clusterSpec{voters: voters, spares: 3, operator: true, defaultTimeouts: defaultTimeouts})
+	c := newCluster(h, clusterSpec{voters: voters, spares: 3, operator: true, defaultTimeouts: defaultTimeouts, drawConfig: true, clients: 2})
 	h.Expect("membership: AddNonvoter", "membership: AddVoter", "membership: DemoteVoter", "membership: RemoveServer",
 		"a server was lost for good", "a lost server was removed", "a removed server was shut down")
 	return c
@@ -75,7 +75,21 @@ func TestDSTMembership(t *testing.T) {
 // 6 of 200 seeds never recovered, and all 6 did with the defaults).
 func TestDSTGray(t *testing.T) {
 	dsttest.Run(t, dstOpts(dsttest.Faults{Crash: true, Disk: true, Partition: true, Network: true, Pause: true, Gray: true}),
-		func(h *dsttest.Harness) { newCluster(h, clusterSpec{voters: 5, defaultTimeouts: true}) })
+		func(h *dsttest.Harness) {
+			newCluster(h, clusterSpec{voters: 5, defaultTimeouts: true, drawConfig: true})
+		})
+}
+
+// TestDSTClocks: five nodes whose clocks are far from true time: offsets
+// up to an hour, rates up to 20% fast or slow (go-dst-kit's defaults are
+// NTP-like: 10ms and 100ppm), with crashes, disk faults, partitions,
+// network faults and pauses. Raft's safety must not depend on clocks, and
+// its randomized timeouts should keep it live. (Phase 1 item 6: up to 40%
+// drift passed 100 seeds too.)
+func TestDSTClocks(t *testing.T) {
+	o := dstOpts(dsttest.Faults{Crash: true, Disk: true, Partition: true, Network: true, Pause: true})
+	o.Clock = dsttest.ClockOptions{MaxOffset: time.Hour, MaxDrift: 0.2}
+	dsttest.Run(t, o, func(h *dsttest.Harness) { sweepCluster(h, 5) })
 }
 
 // Membership changes under gray failure find two raft bugs (DST.md 6.1,

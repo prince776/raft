@@ -347,6 +347,46 @@ count (the configuration can change in between); 6.9; and a new leader's
 commit index is learned while following, so only its own moves are
 judged.
 
+### 6.11 A follower mishandles its own snapshot boundary (liveness, then a panic)
+
+Found by phase 1 item 7 (configuration per seed) with `TrailingLogs` 0,
+which raft accepts. Seed 11 of `TestDSTEverything`:
+
+1. Follower n0 applies up to 207, takes a snapshot and, keeping no
+   trailing entries, compacts its log down to entry 208 alone.
+2. The leader's AppendEntries follows 207. `appendEntries` looks the
+   previous entry up in the log unless it is the last entry (208), and
+   207 is gone, though n0's snapshot proves it committed:
+   `failed to get previous log: previous-index=207 last-index=208`.
+3. The leader backs off to 204 and sends its own snapshot, older than
+   n0's state. n0 installs it: its applied index goes back from 207 to
+   204 and its state machine with it; 208 stays (`no logs to truncate`).
+4. Every AppendEntries after 204 fails the same way and the leader sends
+   the snapshot again, round after round: Antithesis's #697 livelock,
+   reached another way. When the commit index moves past 204, applying 205
+   finds no entry and raft panics (`log not found`).
+
+Fix (switch `snapshot-boundary-fix`; branch `fix/snapshot-boundary` on
+upstream `main`): entries at or below a follower's snapshot are committed,
+and a leader holds every committed entry, so (1) a previous entry at or
+below the snapshot matches and incoming entries it covers are skipped, and
+(2) a follower that already holds a snapshot's last entry (in its log
+with the same term, or under its own snapshot) doesn't install it: Figure
+13, rule 6. My first version of (2) skipped any snapshot ending at or
+before the applied index, and the gray membership sweep found it could
+livelock: a follower whose applied index ran ahead of both its log and
+its own snapshot (an installed snapshot later replaced by an older local
+one, another oddity) acknowledged every snapshot without being able to
+continue from its end. The bug also shows with TrailingLogs 4, not only 0. Evidence: `TestDSTSnapshotBoundary` (TrailingLogs 0, 400
+seeds: correct raft fails 2, the fix 0); upstream-style tests
+`TestRaft_AppendEntries_PrevLogAtSnapshotBoundary` and
+`TestRaft_InstallSnapshot_IgnoresSnapshotOlderThanApplied` fail every run
+on upstream and pass with the fix; upstream's suite passes. Part (2) needs
+no TrailingLogs 0: any follower handed an older snapshot rolls its state
+machine back (the test shows 20 entries going back to 10). Upstream's
+attempted fix for #697 (PR #704, closed) handles only a conflicting entry
+at the snapshot's index, not these.
+
 ## 7. The bug benchmark
 
 `dstbench.json`: bugs behind switches (`bug(name)` in `dstbugs*.go`, only
@@ -363,7 +403,7 @@ in 500 runs). Two are held out (not run until a final check).
 | accept-stale-leader | classic | 0 | 7 | 5 | 2 | |
 | skip-prev-log-term | classic | 1 | 1 | 5 | 3 | |
 | readindex-without-barrier | client | 9 | 1 | 6 | 5 | |
-| quorum-off-by-one | upstream 163a55f | n/a | n/a | n/a | 0 | 0 |
+| quorum-off-by-one | upstream 163a55f | n/a | n/a | n/a | 0 (with the commit-rule check: 300/300) | 0 (with it: 273/300) |
 | nonvoter-can-lead | upstream 656e6c0 + 6b4e320 | | | | | 0 |
 | lease-counts-nonvoters | upstream 6e41709 | | | | | 0 |
 | two-changes-in-flight | classic | | | | | 1 |
@@ -414,11 +454,12 @@ exploration is; 4. guided exploration. Phase 1 items:
 2. ~~Slow and stale components~~ (done: design and what was built below)
 3. Snapshots on the simulated disk (`FileSnapshotStore`; dstmigrate must
    learn `os` file I/O), with crashes and errors
-4. Realistic clients on their own machines: leader discovery, forwarding,
-   retries
+4. ~~Realistic clients on their own machines~~ (done: below)
 5. Store calls that fail (I/O error, disk full)
-6. Clock extremes (large drift, jumps)
-7. Timeouts drawn per seed, raft's defaults included
+6. ~~Clock extremes~~ (done: below)
+7. ~~Timeouts drawn per seed, raft's defaults included~~ (done: the
+   configuration per seed, below; done before 3 to 6 by agreement, since 3
+   waits for dstmigrate's file I/O from the rosedb work)
 
 ### Antithesis's open reports: a benchmark from outside
 
@@ -450,11 +491,84 @@ should fail), measured after each phase.
 - Membership under gray failure lives in the dstbugs build with both
   fixes on; keep it there, or put it in the default suite (red until
   upstream fixes the bugs)?
+- The commit-rule check (6.10) takes quorum-off-by-one from 0 to 300 of
+  300 four-node seeds and 273 of 300 membership seeds (dstbench).
 - quorum-off-by-one end to end: an operator doing manual outage recovery
   (`RecoverCluster`, as `peers.json` in Consul and Nomad) after losing a
   majority for good would expose it within raft's model (with the bug, the
   survivors may lack an acknowledged write). Proposed as a phase 2
   scenario.
+
+### Item 4: clients on their own machines (as built)
+
+Every sweep now also runs two clients on machines of their own
+(`dst_service_test.go`), which partitions and gray failure reach like any
+machine. Each node serves the key-value service on port 8000 (one JSON
+request per connection): the leader executes it; a follower redirects to
+the leader it knows or, on seeds with the feature "servers forward to
+the leader", forwards it there (as Consul forwards RPCs). A client keeps
+the last leader it learned, follows redirects, and retries with the same
+operation ID (timeouts doubling while requests fail) until it gets an
+answer or 2s pass; an operation that may have taken effect is recorded
+as such in the history. The FSM applies each ID once (Raft's client
+sessions, thesis §6.3): retries of committed writes were deduplicated
+1,700 to 2,400 times per 200-seed sweep. Since dedup could hide a raft that
+applies an entry twice, the FSM also checks it sees each log index once,
+in order (`TestDSTCatchesEntryAppliedTwice`: a planted bug, caught on 20
+of 20 seeds).
+
+Adding the clients shifted timing and exposed four harness weaknesses,
+each found as a failing seed and fixed in the harness, not in raft:
+
+- raft's in-memory snapshot store publishes a snapshot when it is
+  created, so a crash mid-write left an empty one ("failed to load any
+  existing snapshots"). Replaced by `dstSnapshotStore`, which publishes on
+  Close (as a temporary file and a rename would), until item 3.
+- The transport's 500ms I/O timeout was shorter than a slow, lossy link's
+  round trip: every RPC to the follower behind it timed out, rejections
+  included, so the leader never caught it up. With a drawn configuration
+  it is now ten heartbeat timeouts (Consul: 10s).
+- Under gray failure a 500ms lease (raft's default) is shorter than a
+  quorum round trip over slow links: every leader stepped down within it.
+  Gray sweeps now configure raft as for a slow network (timeouts 1 or 2
+  times the defaults, the lease a full heartbeat).
+- The liveness checks' 5s deadlines were sized for 200ms timeouts; they now
+  wait ten election timeouts (at least 5s), and the membership check
+  waits for the members to converge instead of looking once.
+
+### Item 6: clock extremes (as built)
+
+`TestDSTClocks`: five nodes, every machine's clock offset by up to an hour
+and running up to 20% fast or slow (go-dst-kit's defaults are 10ms and
+100ppm), with crashes, disk faults, partitions, network faults and
+pauses, configuration drawn per seed: 200 seeds pass. An experiment at
+1%, 5%, 10%, 20% and 40% drift (100 seeds each) found nothing either; the
+drawn clocks were checked to apply (rates 0.6 to 1.4 at 40%). That fits
+hashicorp/raft's design: no safety rule depends on time (reads verify
+leadership with a round of heartbeats, not a lease), and timeouts drawn
+between T and 2T absorb drift.
+
+Not built: clock *jumps*. An NTP step moves the wall clock but not Go's
+monotonic clock, which `time.Since`, timers and deadlines use; Go's
+`time.Time` offers no way to move one without the other, so a faithful
+jump can't be expressed with the standard type. The jumps the monotonic
+clock does see (a VM or process frozen, then resumed) are the Pause
+fault. Also not shown: a check that the clock fault can make fail. The
+natural negative is a lease read (a leader serving reads from its own
+clock), a phase 2 scenario.
+
+### Item 7: raft's configuration per seed (as built)
+
+The sweeps (not the scripted and "catches" tests, which keep dstConfig)
+draw one configuration per seed, the same on every node, from their own
+stream (`raftKnobs` in dst_cluster_test.go): timeouts at raft's defaults
+times 0.2, 0.5 or 1 (always 1 under gray failure); election timeout 1 or
+2 times the heartbeat; lease 0.5 or 1 times it; pre-vote off on a third of
+seeds; MaxAppendEntries 64, 1 or 4; TrailingLogs 32 or 4 (0 found 6.11 and
+is left to its test); SnapshotThreshold 64 or 16; BatchApplyCh on or off.
+Each sweep `Expect`s pre-vote off, small append batches and few trailing
+logs. All sweeps pass 200 seeds with it; the failure report shows the
+seed's configuration.
 
 ### Item 2: slow and stale components (design)
 

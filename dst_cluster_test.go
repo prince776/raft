@@ -13,7 +13,9 @@ package raft
 // memory outside the simulation (for now) and survive crashes whole.
 
 import (
+	"bytes"
 	"fmt"
+	"io"
 	"os"
 	"time"
 
@@ -35,6 +37,81 @@ type clusterSpec struct {
 	// them. Raft needs round trips well under its election timeout; slow
 	// links (Faults.Gray) can take longer than a fifth of the defaults.
 	defaultTimeouts bool
+	// drawConfig draws raft's configuration per seed (raftKnobs), the
+	// same on every node; otherwise it is dstConfig's, fixed.
+	drawConfig bool
+	// clients is the number of clients on their own machines, reaching
+	// the cluster through each node's server (dst_service_test.go).
+	clients int
+	// forceTrailing, with drawConfig, fixes TrailingLogs to
+	// forceTrailingLogs (experiments).
+	forceTrailing     bool
+	forceTrailingLogs uint64
+}
+
+// raftKnobs is the part of raft's configuration a seed draws: options an
+// operator may set, each changing which code paths run.
+type raftKnobs struct {
+	// Timeouts: raft's defaults (heartbeat 1s, election 1s, lease 500ms,
+	// commit 50ms) times scale; with defaultTimeouts (gray failure), scale
+	// is 1 or 2 and the lease a full heartbeat. The
+	// election timeout is the heartbeat timeout times electionX (raft
+	// requires at least 1), the lease the heartbeat timeout times leaseX
+	// (at most 1).
+	scale, electionX, leaseX float64
+	preVoteDisabled          bool   // elections without the pre-vote round
+	maxAppend                int    // MaxAppendEntries: entries per AppendEntries (raft's default 64)
+	trailingLogs             uint64 // entries kept after a snapshot: fewer means more snapshot installs
+	threshold                uint64 // SnapshotThreshold: entries between snapshots
+	batchApply               bool   // BatchApplyCh
+}
+
+func (k raftKnobs) String() string {
+	return fmt.Sprintf("timeouts x%.2f (election x%.1f, lease x%.2f), pre-vote off %v, max append %d, trailing logs %d, snapshot threshold %d, batch apply %v",
+		k.scale, k.electionX, k.leaseX, k.preVoteDisabled, k.maxAppend, k.trailingLogs, k.threshold, k.batchApply)
+}
+
+// drawKnobs draws a configuration from its own stream (so the rest of the
+// run's randomness is unchanged by it).
+func drawKnobs(h *dsttest.Harness, defaultTimeouts bool) raftKnobs {
+	r := h.World().Rand().Stream("raft config")
+	pick := func(xs ...float64) float64 { return xs[r.IntN(len(xs))] }
+	k := raftKnobs{
+		scale:           pick(0.2, 0.2, 0.5, 1),
+		electionX:       pick(1, 1, 2),
+		leaseX:          pick(0.5, 0.5, 1),
+		preVoteDisabled: r.IntN(3) == 0,
+		maxAppend:       []int{64, 64, 1, 4}[r.IntN(4)],
+		// TrailingLogs 0 exposes a raft bug (DST.md 6.11), so the
+		// sweeps leave it to TestDSTSnapshotBoundary.
+		trailingLogs: []uint64{32, 4}[r.IntN(2)],
+		threshold:    []uint64{64, 16}[r.IntN(2)],
+		batchApply:   r.IntN(2) == 0,
+	}
+	if defaultTimeouts {
+		// Gray failure: slow links add up to ~450ms each way, and raft's
+		// timeouts must outlast a quorum round trip (a 500ms lease, raft's
+		// default, made every leader step down within it on some seeds:
+		// configuration, not a bug). Configure it as for a slow network:
+		// raft's defaults or twice them, the lease a full heartbeat.
+		k.scale = pick(1, 2)
+		k.leaseX = 1
+	}
+	return k
+}
+
+func (k raftKnobs) apply(c *Config) {
+	d := DefaultConfig()
+	hb := time.Duration(float64(d.HeartbeatTimeout) * k.scale)
+	c.HeartbeatTimeout = hb
+	c.ElectionTimeout = time.Duration(float64(hb) * k.electionX)
+	c.LeaderLeaseTimeout = time.Duration(float64(hb) * k.leaseX)
+	c.CommitTimeout = time.Duration(float64(d.CommitTimeout) * k.scale)
+	c.PreVoteDisabled = k.preVoteDisabled
+	c.MaxAppendEntries = k.maxAppend
+	c.TrailingLogs = k.trailingLogs
+	c.SnapshotThreshold = k.threshold
+	c.BatchApplyCh = k.batchApply
 }
 
 // dstScenario switches weaker modes on, each to show a check catches what
@@ -49,7 +126,8 @@ type simCluster struct {
 	spec  clusterSpec
 	nodes []*dstNode // the bootstrapped voters first, then the spares
 	kv    *kvWorkload
-	op    *operator // nil unless spec.operator
+	op    *operator  // nil unless spec.operator
+	knobs *raftKnobs // the drawn configuration (nil unless spec.drawConfig)
 }
 
 // dstNode is one machine. Its log and stable store live in a file on its
@@ -59,7 +137,7 @@ type dstNode struct {
 	name    string
 	initial bool // bootstrapped as a voter (else a spare)
 	logs    *dstLogStore
-	snaps   *InmemSnapshotStore
+	snaps   *dstSnapshotStore
 	fsm     *kvFSM
 	raft    *Raft
 	m       *dsttest.Machine
@@ -98,9 +176,28 @@ func dstConfig(w *dst.World, name string) *Config {
 // and checks.
 func newCluster(h *dsttest.Harness, spec clusterSpec) *simCluster {
 	c := &simCluster{h: h, spec: spec}
+	if spec.drawConfig {
+		k := drawKnobs(h, spec.defaultTimeouts)
+		if spec.forceTrailing {
+			k.trailingLogs = spec.forceTrailingLogs
+		}
+		c.knobs = &k
+		if k.preVoteDisabled {
+			h.Sometimes("raft config: pre-vote off")
+		}
+		if k.maxAppend < 64 {
+			h.Sometimes("raft config: small append batches")
+		}
+		if k.trailingLogs < 32 {
+			h.Sometimes("raft config: few trailing logs")
+		}
+	}
+	if spec.drawConfig {
+		h.Expect("raft config: pre-vote off", "raft config: small append batches", "raft config: few trailing logs")
+	}
 	var initial []Server
 	for i := range spec.voters + spec.spares {
-		nd := &dstNode{name: fmt.Sprintf("n%d", i), initial: i < spec.voters, snaps: NewInmemSnapshotStore()}
+		nd := &dstNode{name: fmt.Sprintf("n%d", i), initial: i < spec.voters, snaps: &dstSnapshotStore{}}
 		c.nodes = append(c.nodes, nd)
 		if nd.initial {
 			initial = append(initial, Server{ID: nd.id(), Address: nd.addr()})
@@ -112,6 +209,12 @@ func newCluster(h *dsttest.Harness, spec clusterSpec) *simCluster {
 	}
 	for _, nd := range c.nodes {
 		nd.m = h.Machine(nd.name, func(w *dst.World) { c.boot(nd, w, initial) })
+	}
+	for i := range spec.clients {
+		h.Machine(fmt.Sprintf("c%d", i), func(w *dst.World) { c.kv.remoteClient(w, i) }, dsttest.NeverCrash)
+	}
+	if spec.clients > 0 {
+		h.Expect("a remote client's operation succeeded", "a remote client followed a redirect", "a remote client retried")
 	}
 	c.checks()
 	return c
@@ -128,7 +231,7 @@ func (c *simCluster) boot(nd *dstNode, w *dst.World, initial []Server) {
 			h.Fail(err)
 			return
 		}
-		nd.snaps = NewInmemSnapshotStore()
+		nd.snaps = &dstSnapshotStore{}
 		h.Sometimes("a node lost its disk")
 	}
 	nd.snaps.w = w
@@ -144,13 +247,24 @@ func (c *simCluster) boot(nd *dstNode, w *dst.World, initial []Server) {
 		h.Fail(err)
 		return
 	}
-	trans := NewNetworkTransportWithConfig(&NetworkTransportConfig{Stream: stream, MaxPool: 3, Timeout: 500 * time.Millisecond,
-		Logger: hclog.NewNullLogger(), World: w})
 	conf := dstConfig(w, nd.name)
 	if c.spec.defaultTimeouts {
 		d := DefaultConfig()
 		conf.HeartbeatTimeout, conf.ElectionTimeout, conf.LeaderLeaseTimeout, conf.CommitTimeout = d.HeartbeatTimeout, d.ElectionTimeout, d.LeaderLeaseTimeout, d.CommitTimeout
 	}
+	// The transport's I/O timeout: 500ms for the fixed configuration (the
+	// seeds its tests assert on depend on it); with a drawn configuration,
+	// ten heartbeat timeouts (Consul uses 10s with raft's 1s defaults). A
+	// timeout shorter than a slow, lossy link's round trip strands the
+	// follower behind it for good: every RPC to it times out, including
+	// its rejections, so the leader never backs off to catch it up.
+	transTimeout := 500 * time.Millisecond
+	if c.knobs != nil {
+		c.knobs.apply(conf)
+		transTimeout = 10 * conf.HeartbeatTimeout
+	}
+	trans := NewNetworkTransportWithConfig(&NetworkTransportConfig{Stream: stream, MaxPool: 3, Timeout: transTimeout,
+		Logger: hclog.NewNullLogger(), World: w})
 	if nd.initial {
 		if ok, _ := HasExistingState(nd.logs, nd.logs, nd.snaps); !ok {
 			if err := BootstrapCluster(conf, nd.logs, nd.logs, nd.snaps, trans, Configuration{Servers: initial}); err != nil {
@@ -159,7 +273,7 @@ func (c *simCluster) boot(nd *dstNode, w *dst.World, initial []Server) {
 			}
 		}
 	}
-	nd.fsm = &kvFSM{kv: map[string]string{}, h: h}
+	nd.fsm = newKVFSM(h)
 	r, err := NewRaft(conf, nd.fsm, nd.logs, nd.logs, nd.snaps, trans)
 	if err != nil {
 		h.Fail(err)
@@ -168,6 +282,10 @@ func (c *simCluster) boot(nd *dstNode, w *dst.World, initial []Server) {
 	nd.raft = r
 	if c.op != nil {
 		w.Go(func() { c.op.run(w, nd) })
+	}
+	if c.spec.clients > 0 {
+		kc := &kvClient{h: h, w: w, r: r, fsm: nd.fsm, naive: c.spec.scenario.naiveReadIndex}
+		w.Go(func() { c.serve(w, nd, kc) })
 	}
 	c.kv.run(w, nd)
 }
@@ -194,16 +312,113 @@ func (c *simCluster) leader() *dstNode {
 	return best
 }
 
-// dstCluster and dstClusterWith are the fixed clusters most sweeps use:
-// n voters, no spares, no membership changes.
+// dstCluster and dstClusterWith are fixed clusters: n voters, no spares,
+// no membership changes, dstConfig's configuration. sweepCluster is the
+// same with the configuration drawn per seed, for the sweeps.
 func dstCluster(h *dsttest.Harness, n int) []*dstNode { return dstClusterWith(h, n, dstScenario{}) }
+
+func sweepCluster(h *dsttest.Harness, n int) *simCluster {
+	return newCluster(h, clusterSpec{voters: n, drawConfig: true, clients: 2})
+}
 
 func dstClusterWith(h *dsttest.Harness, n int, sc dstScenario) []*dstNode {
 	return newCluster(h, clusterSpec{voters: n, scenario: sc}).nodes
 }
 
-// covers reports whether the store's latest finished snapshot includes
-// index (for checks between scheduling steps: no lock).
-func (s *InmemSnapshotStore) covers(index uint64) bool {
-	return s != nil && s.hasSnapshot && s.latest != nil && s.latest.meta.Index >= index
+// patience is how long the liveness checks wait for the cluster: ten
+// election timeouts, at least 5s. A cluster whose timeouts are drawn long
+// (up to twice raft's defaults) needs seconds for one failed election.
+func (c *simCluster) patience() time.Duration {
+	if c.knobs == nil {
+		return 5 * time.Second
+	}
+	k := c.knobs
+	election := time.Duration(float64(DefaultConfig().HeartbeatTimeout) * k.scale * k.electionX)
+	if p := 10 * election; p > 5*time.Second { // raft's max shadows the builtin
+		return p
+	}
+	return 5 * time.Second
+}
+
+// dstSnapshotStore keeps a node's latest snapshot in memory, outside the
+// simulation, so crashes don't lose it. Unlike raft's InmemSnapshotStore,
+// which replaces its snapshot when one is created, it publishes a snapshot
+// only when its sink is closed: a crash while one is being written leaves
+// the previous one, as a store that writes a temporary file and renames it
+// does. (Phase 1 item 3 replaces it with FileSnapshotStore on the
+// simulated disk.)
+type dstSnapshotStore struct {
+	mu   dst.Mutex
+	w    *dst.World
+	meta *SnapshotMeta // the latest published snapshot, or nil
+	data []byte
+}
+
+type dstSnapshotSink struct {
+	s    *dstSnapshotStore
+	meta SnapshotMeta
+	buf  bytes.Buffer
+	done bool
+}
+
+func (s *dstSnapshotStore) Create(version SnapshotVersion, index, term uint64, configuration Configuration,
+	configurationIndex uint64, trans Transport) (SnapshotSink, error) {
+	if version != 1 {
+		return nil, fmt.Errorf("unsupported snapshot version %d", version)
+	}
+	return &dstSnapshotSink{s: s, meta: SnapshotMeta{Version: version, ID: snapshotName(s.w, term, index), Index: index, Term: term,
+		Peers: encodePeers(configuration, trans), Configuration: configuration, ConfigurationIndex: configurationIndex}}, nil
+}
+
+func (s *dstSnapshotStore) List() ([]*SnapshotMeta, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.meta == nil {
+		return nil, nil
+	}
+	m := *s.meta
+	return []*SnapshotMeta{&m}, nil
+}
+
+func (s *dstSnapshotStore) Open(id string) (*SnapshotMeta, io.ReadCloser, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.meta == nil || s.meta.ID != id {
+		return nil, nil, fmt.Errorf("snapshot %s not found", id)
+	}
+	m := *s.meta
+	return &m, io.NopCloser(bytes.NewReader(s.data)), nil
+}
+
+func (k *dstSnapshotSink) Write(p []byte) (int, error) {
+	n, err := k.buf.Write(p)
+	k.meta.Size += int64(n)
+	return n, err
+}
+
+// Close publishes the snapshot.
+func (k *dstSnapshotSink) Close() error {
+	if k.done {
+		return nil
+	}
+	k.done = true
+	k.s.mu.Lock()
+	defer k.s.mu.Unlock()
+	m := k.meta
+	k.s.meta, k.s.data = &m, bytes.Clone(k.buf.Bytes())
+	return nil
+}
+
+// Cancel drops the snapshot.
+func (k *dstSnapshotSink) Cancel() error {
+	k.done = true
+	return nil
+}
+
+func (k *dstSnapshotSink) ID() string { return k.meta.ID }
+
+// covers reports whether the latest published snapshot includes index
+// (for checks between scheduling steps: no lock).
+func (s *dstSnapshotStore) covers(index uint64) bool {
+	return s != nil && s.meta != nil && s.meta.Index >= index
 }

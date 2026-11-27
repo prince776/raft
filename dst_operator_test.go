@@ -330,7 +330,21 @@ func (o *operator) final() (Configuration, error) {
 
 // agree: every running member's committed configuration is the leader's
 // (a member whose raft shut down doesn't take part, so isn't asked).
-func (o *operator) agree() error {
+// agree waits, up to the cluster's patience, for every running member to
+// hold the leader's committed configuration: a follower behind a slow link
+// lags by its round trips, so a single look would fail a correct cluster.
+func (o *operator) agree(w *dst.World) error {
+	deadline := w.Now().Add(o.c.patience())
+	for {
+		err := o.agreeNow()
+		if err == nil || w.Now().After(deadline) {
+			return err
+		}
+		w.Sleep(50 * time.Millisecond)
+	}
+}
+
+func (o *operator) agreeNow() error {
 	cfg, err := o.final()
 	if err != nil {
 		return err

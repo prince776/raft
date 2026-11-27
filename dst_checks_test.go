@@ -182,7 +182,7 @@ func (c *simCluster) checks() {
 		return nil
 	})
 	if c.op != nil {
-		h.Final("the members agree on the configuration", func(w *dst.World) error { return c.op.agree() })
+		h.Final("the members agree on the configuration", func(w *dst.World) error { return c.op.agree(w) })
 		h.Final("membership changes are linearizable", func(w *dst.World) error { return c.op.linearizable() })
 	}
 	h.Expect("a write committed", "a read through the log", "a ReadIndex read", "a snapshot was persisted")
@@ -192,7 +192,7 @@ func (c *simCluster) checks() {
 // write commits through: a cluster that keeps a live majority of its
 // voters must make progress again.
 func (c *simCluster) recovers(w *dst.World) error {
-	deadline := w.Now().Add(5 * time.Second)
+	deadline := w.Now().Add(c.patience())
 	for try := 1; ; try++ {
 		if l := c.leader(); l != nil {
 			// A failed attempt may still commit: each attempt is its own write.
@@ -206,7 +206,7 @@ func (c *simCluster) recovers(w *dst.World) error {
 				return fmt.Errorf("the probe write through %s failed: %v", l.name, err)
 			}
 		} else if w.Now().After(deadline) {
-			return fmt.Errorf("no leader 5s after the faults ended:\n%s", c.describe())
+			return fmt.Errorf("no leader %v after the faults ended:\n%s", c.patience(), c.describe())
 		}
 		w.Sleep(50 * time.Millisecond)
 	}
@@ -237,6 +237,9 @@ func (c *simCluster) members() []*dstNode {
 // describe is each node's state, for failure reports.
 func (c *simCluster) describe() string {
 	var b strings.Builder
+	if c.knobs != nil {
+		fmt.Fprintf(&b, "  raft config: %v\n", *c.knobs)
+	}
 	for _, nd := range c.nodes {
 		switch {
 		case nd.m.Lost():

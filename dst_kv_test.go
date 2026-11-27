@@ -2,7 +2,9 @@ package raft
 
 // The key-value service on raft, as an application embeds it: an FSM, and
 // on each node a client that, while its node leads, puts through the log
-// and gets through the log or by ReadIndex. Its history is checked for
+// and gets through the log or by ReadIndex. Clients on their own machines
+// reach the same operations through each node's server
+// (dst_service_test.go). Their shared history is checked for
 // linearizability (dst_checks_test.go).
 
 import (
@@ -58,12 +60,23 @@ type kvCmd struct {
 	Value string
 }
 
-// kvFSM applies kvCmds: a map, and the sequence of commands applied.
+// kvFSM applies kvCmds: a map, and the sequence of commands applied. A
+// command whose ID it has already applied (a client's retry, appended to
+// the log again) is answered from its first application and not applied
+// again, as Raft's client sessions do (thesis §6.3). Retries thus can't
+// show up as a command applied twice, so the FSM checks the log itself:
+// it must see each log index once, in increasing order.
 type kvFSM struct {
-	mu      dst.Mutex
-	kv      map[string]string
-	applied []string // command IDs, in order
-	h       *dsttest.Harness
+	mu        dst.Mutex
+	kv        map[string]string
+	applied   []string // command IDs, in order (first applications only)
+	seen      map[string]kvResult
+	lastIndex uint64 // the last log index applied
+	h         *dsttest.Harness
+}
+
+func newKVFSM(h *dsttest.Harness) *kvFSM {
+	return &kvFSM{kv: map[string]string{}, seen: map[string]kvResult{}, h: h}
 }
 
 type kvResult struct {
@@ -78,13 +91,24 @@ func (f *kvFSM) Apply(l *Log) interface{} {
 	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if l.Index <= f.lastIndex {
+		f.h.Fail(fmt.Errorf("the FSM was given log index %d after %d: an entry applied twice or out of order", l.Index, f.lastIndex))
+	}
+	f.lastIndex = l.Index
+	if prev, ok := f.seen[c.ID]; ok {
+		f.h.Sometimes("a retried command was deduplicated")
+		return prev
+	}
 	f.applied = append(f.applied, c.ID)
+	res := kvResult{}
 	if c.Get {
 		v, ok := f.kv[c.Key]
-		return kvResult{v, ok}
+		res = kvResult{v, ok}
+	} else {
+		f.kv[c.Key] = c.Value
 	}
-	f.kv[c.Key] = c.Value
-	return kvResult{}
+	f.seen[c.ID] = res
+	return res
 }
 
 func (f *kvFSM) read(key string) kvResult {
@@ -95,14 +119,16 @@ func (f *kvFSM) read(key string) kvResult {
 }
 
 type kvState struct {
-	KV      map[string]string
-	Applied []string
+	KV        map[string]string
+	Applied   []string
+	Seen      map[string]kvResult
+	LastIndex uint64
 }
 
 func (f *kvFSM) Snapshot() (FSMSnapshot, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	return &kvSnapshot{st: kvState{KV: maps.Clone(f.kv), Applied: slices.Clone(f.applied)}, h: f.h}, nil
+	return &kvSnapshot{st: kvState{KV: maps.Clone(f.kv), Applied: slices.Clone(f.applied), Seen: maps.Clone(f.seen), LastIndex: f.lastIndex}, h: f.h}, nil
 }
 
 func (f *kvFSM) Restore(r io.ReadCloser) error {
@@ -112,9 +138,12 @@ func (f *kvFSM) Restore(r io.ReadCloser) error {
 		return err
 	}
 	f.mu.Lock()
-	f.kv, f.applied = st.KV, st.Applied
+	f.kv, f.applied, f.seen, f.lastIndex = st.KV, st.Applied, st.Seen, st.LastIndex
 	if f.kv == nil {
 		f.kv = map[string]string{}
+	}
+	if f.seen == nil {
+		f.seen = map[string]kvResult{}
 	}
 	f.mu.Unlock()
 	f.h.Sometimes("an FSM was restored from a snapshot")
@@ -153,46 +182,81 @@ type kvClient struct {
 	barrierTerm uint64
 }
 
-// op is one operation: a put through the log (half the time), or a get,
-// through the log or by ReadIndex.
-func (c *kvClient) op(id, key string) {
-	h, w, r := c.h, c.w, c.r
-	apply := func(cmd kvCmd) (kvResult, error) {
-		data, _ := json.Marshal(cmd)
-		f := r.Apply(data, 500*time.Millisecond)
-		if err := f.Error(); err != nil {
-			return kvResult{}, err
+// kvOutcome is what became of an operation on the leader.
+type kvOutcome int
+
+const (
+	kvDone       kvOutcome = iota // done: written, or read
+	kvNotApplied                  // never entered the log: no effect
+	kvUnknown                     // may or may not take effect
+)
+
+// apply puts cmd through the log and waits for its result.
+func (c *kvClient) apply(cmd kvCmd) (kvResult, kvOutcome) {
+	data, _ := json.Marshal(cmd)
+	f := c.r.Apply(data, 500*time.Millisecond)
+	if err := f.Error(); err != nil {
+		if errors.Is(err, ErrNotLeader) || errors.Is(err, ErrEnqueueTimeout) {
+			return kvResult{}, kvNotApplied // never entered the log
 		}
-		res, _ := f.Response().(kvResult)
-		return res, nil
+		return kvResult{}, kvUnknown // it may still commit
 	}
-	// notApplied: errors that mean the command never entered the log.
-	notApplied := func(err error) bool { return errors.Is(err, ErrNotLeader) || errors.Is(err, ErrEnqueueTimeout) }
-	switch x := w.Rand().IntN(4); {
+	res, _ := f.Response().(kvResult)
+	return res, kvDone
+}
+
+// put writes value (the operation's ID) to key through the log.
+func (c *kvClient) put(id, key string) kvOutcome {
+	_, o := c.apply(kvCmd{ID: id, Key: key, Value: id})
+	if o == kvDone {
+		c.h.Sometimes("a write committed")
+	}
+	return o
+}
+
+// logGet reads key through the log.
+func (c *kvClient) logGet(id, key string) (kvResult, kvOutcome) {
+	res, o := c.apply(kvCmd{ID: id, Get: true, Key: key})
+	if o == kvDone {
+		c.h.Sometimes("a read through the log")
+	}
+	return res, o
+}
+
+// record runs one operation, recording it in the history: a put (half
+// the time), or a get through the log or by ReadIndex.
+func (c *kvClient) op(id, key string) {
+	x := c.w.Rand().IntN(4)
+	in := check.KVInput{Op: check.KVGet, Key: key}
+	if x < 2 {
+		in = check.KVInput{Op: check.KVPut, Key: key, Value: id}
+	}
+	call := c.hist.Invoke(c.id, in)
+	var res kvResult
+	var o kvOutcome
+	switch {
 	case x < 2:
-		call := c.hist.Invoke(c.id, check.KVInput{Op: check.KVPut, Key: key, Value: id})
-		_, err := apply(kvCmd{ID: id, Key: key, Value: id})
-		switch {
-		case err == nil:
-			c.acked[id] = true
-			call.Return(check.KVOutput{})
-			h.Sometimes("a write committed")
-		case notApplied(err):
-			call.Fail()
-		default:
-			call.Abandon() // it may still commit
-		}
+		o = c.put(id, key)
 	case x == 2:
-		call := c.hist.Invoke(c.id, check.KVInput{Op: check.KVGet, Key: key})
-		res, err := apply(kvCmd{ID: id, Get: true, Key: key})
-		if err != nil {
-			call.Abandon()
-			return
+		res, o = c.logGet(id, key)
+	default:
+		res, o = c.readIndex(key)
+	}
+	endCall(call, in, res, o, id, c.acked)
+}
+
+// endCall ends call by outcome o, marking an acknowledged put in acked.
+func endCall(call check.Call[check.KVInput, check.KVOutput], in check.KVInput, res kvResult, o kvOutcome, id string, acked map[string]bool) {
+	switch o {
+	case kvDone:
+		if in.Op == check.KVPut {
+			acked[id] = true
 		}
 		call.Return(check.KVOutput{Value: res.Value, Found: res.Found})
-		h.Sometimes("a read through the log")
+	case kvNotApplied:
+		call.Fail()
 	default:
-		c.readIndex(key)
+		call.Abandon()
 	}
 }
 
@@ -201,30 +265,26 @@ func (c *kvClient) op(id, key string) {
 // index is current; then for each read take the commit index, confirm
 // leadership (VerifyLeader: a quorum still follows), wait until the FSM
 // has applied that far, and read locally.
-func (c *kvClient) readIndex(key string) {
+func (c *kvClient) readIndex(key string) (kvResult, kvOutcome) {
 	h, w, r := c.h, c.w, c.r
 	term := r.getCurrentTerm()
 	if !c.naive && !bug("readindex-without-barrier") && c.barrierTerm != term {
 		if r.Barrier(500*time.Millisecond).Error() != nil || r.getCurrentTerm() != term {
-			return
+			return kvResult{}, kvUnknown
 		}
 		c.barrierTerm = term
 	}
-	call := c.hist.Invoke(c.id, check.KVInput{Op: check.KVGet, Key: key})
 	idx := r.CommitIndex()
 	if err := r.VerifyLeader().Error(); err != nil || r.getCurrentTerm() != term {
-		call.Abandon()
-		return
+		return kvResult{}, kvUnknown
 	}
 	deadline := w.Now().Add(500 * time.Millisecond)
 	for r.AppliedIndex() < idx {
 		if w.Now().After(deadline) {
-			call.Abandon()
-			return
+			return kvResult{}, kvUnknown
 		}
 		w.Sleep(time.Millisecond)
 	}
-	res := c.fsm.read(key)
-	call.Return(check.KVOutput{Value: res.Value, Found: res.Found})
 	h.Sometimes("a ReadIndex read")
+	return c.fsm.read(key), kvDone
 }
