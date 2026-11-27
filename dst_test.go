@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"maps"
 	"slices"
 	"testing"
 	"time"
@@ -69,6 +70,7 @@ type dstNode struct {
 	snaps *InmemSnapshotStore
 	fsm   *seqFSM
 	raft  *Raft
+	m     *dsttest.Machine
 }
 
 func dstConfig(w *dst.World, name string) *Config {
@@ -92,8 +94,9 @@ func dstCluster(h *dsttest.Harness, n int) []*dstNode {
 		servers = append(servers, Server{ID: ServerID(name), Address: ServerAddress(name + ":7000")})
 	}
 	seq := 0
+	acked := map[string]bool{} // writes whose Apply succeeded
 	for _, nd := range nodes {
-		h.Machine(nd.name, func(w *dst.World) {
+		nd.m = h.Machine(nd.name, func(w *dst.World) {
 			nd.snaps.w = w
 			stream, err := newDSTStream(w, nd.name+":7000")
 			if err != nil {
@@ -120,7 +123,9 @@ func dstCluster(h *dsttest.Harness, n int) []*dstNode {
 			for h.Phase() == dsttest.Faulty {
 				if r.State() == Leader {
 					seq++
-					if r.Apply([]byte(fmt.Sprintf("w%d", seq)), 500*time.Millisecond).Error() == nil {
+					cmd := fmt.Sprintf("w%d", seq)
+					if r.Apply([]byte(cmd), 500*time.Millisecond).Error() == nil {
+						acked[cmd] = true
 						h.Sometimes("a write committed")
 					}
 				}
@@ -128,6 +133,38 @@ func dstCluster(h *dsttest.Harness, n int) []*dstNode {
 			}
 		})
 	}
+	// Election safety: at most one leader per term, ever (a crashed node's
+	// raft keeps its last state, so only running nodes count).
+	leaders := map[uint64]string{}
+	h.Always("at most one leader per term", func() error {
+		for _, nd := range nodes {
+			if nd.raft == nil || nd.m.Dead() || nd.raft.getState() != Leader {
+				continue
+			}
+			term := nd.raft.getCurrentTerm()
+			if other, ok := leaders[term]; ok && other != nd.name {
+				return fmt.Errorf("term %d has two leaders: %s and %s", term, other, nd.name)
+			}
+			leaders[term] = nd.name
+		}
+		return nil
+	})
+	h.Final("acknowledged writes survive", func(w *dst.World) error {
+		applied := map[string]bool{}
+		for _, nd := range nodes {
+			if nd.fsm != nil {
+				for _, c := range nd.fsm.applied {
+					applied[c] = true
+				}
+			}
+		}
+		for _, c := range slices.Sorted(maps.Keys(acked)) {
+			if !applied[c] {
+				return fmt.Errorf("%s was acknowledged but no node applied it", c)
+			}
+		}
+		return nil
+	})
 	h.Final("the nodes applied the same sequence", func(w *dst.World) error {
 		var longest []string
 		for _, nd := range nodes {
@@ -159,8 +196,28 @@ func dstCluster(h *dsttest.Harness, n int) []*dstNode {
 	return nodes
 }
 
+func dstOpts(f dsttest.Faults) dsttest.Options {
+	return dsttest.Options{Seeds: 50, Faults: f, FaultPhase: 10 * time.Second, RecoveryPhase: 10 * time.Second}
+}
+
 // TestDSTSmoke: three nodes, scheduling only.
 func TestDSTSmoke(t *testing.T) {
-	dsttest.Run(t, dsttest.Options{Seeds: 20, FaultPhase: 5 * time.Second, RecoveryPhase: 5 * time.Second},
-		func(h *dsttest.Harness) { dstCluster(h, 3) })
+	dsttest.Run(t, dstOpts(dsttest.Faults{}), func(h *dsttest.Harness) { dstCluster(h, 3) })
+}
+
+// TestDSTCrashes: nodes crash and restart (their stores are durable).
+func TestDSTCrashes(t *testing.T) {
+	dsttest.Run(t, dstOpts(dsttest.Faults{Crash: true}), func(h *dsttest.Harness) { dstCluster(h, 3) })
+}
+
+// TestDSTPartitions: the network partitions (sometimes one way), with
+// latency spikes and connection resets.
+func TestDSTPartitions(t *testing.T) {
+	dsttest.Run(t, dstOpts(dsttest.Faults{Partition: true, Network: true}), func(h *dsttest.Harness) { dstCluster(h, 3) })
+}
+
+// TestDSTEverything: crashes, partitions, pauses and network faults at
+// once, five nodes.
+func TestDSTEverything(t *testing.T) {
+	dsttest.Run(t, dstOpts(dsttest.Faults{Crash: true, Partition: true, Network: true, Pause: true}), func(h *dsttest.Harness) { dstCluster(h, 5) })
 }
