@@ -266,12 +266,11 @@ func BootstrapCluster(conf *Config, logs LogStore, stable StableStore,
 		return ErrCantBootstrap
 	}
 
-	// Set current term to 1.
-	if err := stable.SetUint64(keyCurrentTerm, 1); err != nil {
-		return fmt.Errorf("failed to save current term: %v", err)
-	}
-
-	// Append configuration entry to log.
+	// Append configuration entry to log, then set the current term to 1.
+	// The order matters for a crash between the two writes: the term alone
+	// makes HasExistingState report state, so bootstrapping again would fail
+	// and the server would be left without a configuration, unable to ever
+	// elect a leader. A log entry alone is a bootstrapped server.
 	entry := &Log{
 		Index: 1,
 		Term:  1,
@@ -285,6 +284,9 @@ func BootstrapCluster(conf *Config, logs LogStore, stable StableStore,
 	}
 	if err := logs.StoreLog(entry); err != nil {
 		return fmt.Errorf("failed to append configuration entry to log: %v", err)
+	}
+	if err := stable.SetUint64(keyCurrentTerm, 1); err != nil {
+		return fmt.Errorf("failed to save current term: %v", err)
 	}
 
 	return nil
