@@ -191,3 +191,52 @@ follows rule 6 exactly. Upstream's suite passes with the fix.
 
 - #697 (Antithesis): InstallSnapshot livelock. PR #704 (closed) addressed
   a conflicting entry at the snapshot's index, not these two cases.
+
+---
+
+<!-- THIRD DRAFT, a separate issue. Not posted; Prince decides. -->
+
+# NewRaft panics when the newest snapshot can't be read and the log was compacted past an older one
+
+## Summary
+
+At startup, `restoreSnapshot` tries the snapshots newest first and, if one
+fails to restore, silently falls back to the next. `FileSnapshotStore.List`
+likewise skips a snapshot whose `meta.json` it can't read. Either way raft
+may restore an older snapshot, or none, while the log was compacted past
+it by the newest snapshot. `NewRaft` then replays the log from the
+restored index and panics (`log not found`).
+
+With `retain` 2 (Consul's setting) and `TrailingLogs` below the snapshot
+interval this is the usual layout, so one unreadable newest snapshot (an
+I/O error while reading it, or a corrupt file) turns into a startup panic.
+A transient error heals on the next start; a snapshot that stays
+unreadable crash-loops the node, where a clean error was due (the node
+can't recover from its own data either way, since the entries are gone).
+
+## Reproduction
+
+A plain test with raft's helpers and the real filesystem: one node,
+`TrailingLogs` 0, `FileSnapshotStore` with retain 2; apply 10 entries,
+snapshot, apply 10, snapshot, apply 1; shut down; delete the newest
+snapshot's `state.bin`; `NewRaft` with the same stores panics with
+`log not found` (every run). Branch: (to be cut, like
+`fix/snapshot-boundary`, from `TestSnapshotFallbackGap` on
+<https://github.com/prince776/raft/tree/dst>).
+
+Found with deterministic simulation (go-dst-kit) injecting disk errors:
+seed 99 (reading `state.bin` failed: raft restored the older snapshot 83,
+then entry 84 was gone) and seed 190 (reading `meta.json` failed: List
+returned nothing, raft started without a snapshot and found no entry 1).
+
+## Possible fix
+
+1. In `restoreSnapshot`, restore an older snapshot only if the log holds
+   every entry after it (`FirstIndex <= index+1`, or the log ends at or
+   before it).
+2. In `NewRaft`, before replaying the log, return an error if the log
+   doesn't follow the restored snapshot (or the absence of one) instead
+   of panicking.
+
+Also: `NewFileSnapshotStoreWithLogger` wraps errors with `%v`, so callers
+can't detect, say, a full disk with `errors.Is(err, syscall.ENOSPC)`.
