@@ -10,6 +10,7 @@ import (
 
 	hclog "github.com/hashicorp/go-hclog"
 	"github.com/hashicorp/go-metrics"
+	"github.com/prince776/go-dst-kit/dst"
 )
 
 // FSM is implemented by clients to make use of the replicated log.
@@ -103,7 +104,7 @@ func (r *Raft) runFSM() {
 
 		switch req.log.Type {
 		case LogCommand:
-			start := time.Now()
+			start := r.w.Now()
 			resp = r.fsm.Apply(req.log)
 			metrics.MeasureSince([]string{"raft", "fsm", "apply"}, start)
 
@@ -114,7 +115,7 @@ func (r *Raft) runFSM() {
 				return
 			}
 
-			start := time.Now()
+			start := r.w.Now()
 			configStore.StoreConfiguration(req.log.Index, DecodeConfiguration(req.log.Data))
 			metrics.MeasureSince([]string{"raft", "fsm", "store_config"}, start)
 		}
@@ -154,7 +155,7 @@ func (r *Raft) runFSM() {
 
 		var responses []interface{}
 		if len(sendLogs) > 0 {
-			start := time.Now()
+			start := r.w.Now()
 			responses = batchingFSM.ApplyBatch(sendLogs)
 			metrics.MeasureSince([]string{"raft", "fsm", "applyBatch"}, start)
 			metrics.AddSample([]string{"raft", "fsm", "applyBatchNum"}, float32(len(reqs)))
@@ -202,7 +203,7 @@ func (r *Raft) runFSM() {
 		)
 
 		// Attempt to restore
-		if err := fsmRestoreAndMeasure(snapLogger, r.fsm, source, meta.Size); err != nil {
+		if err := fsmRestoreAndMeasure(r.w, snapLogger, r.fsm, source, meta.Size); err != nil {
 			req.respond(fmt.Errorf("failed to restore snapshot %v: %v", req.ID, err))
 			return
 		}
@@ -221,7 +222,7 @@ func (r *Raft) runFSM() {
 		}
 
 		// Start a snapshot
-		start := time.Now()
+		start := r.w.Now()
 		snap, err := r.fsm.Snapshot()
 		metrics.MeasureSince([]string{"raft", "fsm", "snapshot"}, start)
 
@@ -232,33 +233,47 @@ func (r *Raft) runFSM() {
 		req.respond(err)
 	}
 
-	saturation := newSaturationMetric([]string{"raft", "thread", "fsm", "saturation"}, 1*time.Second)
+	saturation := newSaturationMetric(r.w, []string{"raft", "thread", "fsm", "saturation"}, 1*time.Second)
 
 	for {
 		saturation.sleeping()
 
-		select {
-		case ptr := <-r.fsmMutateCh:
-			saturation.working()
+		{
+			var sel1 int
+			var sel1v1 interface{}
+			var sel1v2 *reqSnapshotFuture
+			dst.Select(r.w,
+				dst.OnRecv(r.fsmMutateCh, func(v interface{}, _ bool) { sel1 = 1; sel1v1 = v }),
+				dst.OnRecv(r.fsmSnapshotCh, func(v *reqSnapshotFuture, _ bool) { sel1 = 2; sel1v2 = v }),
+				dst.OnRecv(r.shutdownCh, func(_ struct{}, _ bool) { sel1 = 3 }),
+			)
+			switch sel1 {
+			case 1:
+				ptr := sel1v1
+				saturation.working()
 
-			switch req := ptr.(type) {
-			case []*commitTuple:
-				applyBatch(req)
+				switch req := ptr.(type) {
+				case []*commitTuple:
+					applyBatch(req)
 
-			case *restoreFuture:
-				restore(req)
+				case *restoreFuture:
+					restore(req)
 
+				default:
+					panic(fmt.Errorf("bad type passed to fsmMutateCh: %#v", ptr))
+				}
+
+			case 2:
+				req := sel1v2
+				saturation.working()
+
+				snapshot(req)
+
+			case 3:
+				return
 			default:
-				panic(fmt.Errorf("bad type passed to fsmMutateCh: %#v", ptr))
+				panic("dstmigrate: no select case ran")
 			}
-
-		case req := <-r.fsmSnapshotCh:
-			saturation.working()
-
-			snapshot(req)
-
-		case <-r.shutdownCh:
-			return
 		}
 	}
 }
@@ -266,12 +281,12 @@ func (r *Raft) runFSM() {
 // fsmRestoreAndMeasure wraps the Restore call on an FSM to consistently measure
 // and report timing metrics. The caller is still responsible for calling Close
 // on the source in all cases.
-func fsmRestoreAndMeasure(logger hclog.Logger, fsm FSM, source io.ReadCloser, snapshotSize int64) error {
-	start := time.Now()
+func fsmRestoreAndMeasure(w *dst.World, logger hclog.Logger, fsm FSM, source io.ReadCloser, snapshotSize int64) error {
+	start := w.Now()
 
 	crc := newCountingReadCloser(source)
 
-	monitor := startSnapshotRestoreMonitor(logger, crc, snapshotSize, false)
+	monitor := startSnapshotRestoreMonitor(w, logger, crc, snapshotSize, false)
 	defer monitor.StopAndWait()
 
 	if err := fsm.Restore(crc); err != nil {
@@ -279,7 +294,7 @@ func fsmRestoreAndMeasure(logger hclog.Logger, fsm FSM, source io.ReadCloser, sn
 	}
 	metrics.MeasureSince([]string{"raft", "fsm", "restore"}, start)
 	metrics.SetGauge([]string{"raft", "fsm", "lastRestoreDuration"},
-		float32(time.Since(start).Milliseconds()))
+		float32(w.Since(start).Milliseconds()))
 
 	return nil
 }

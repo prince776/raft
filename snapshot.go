@@ -10,6 +10,7 @@ import (
 	"time"
 
 	metrics "github.com/hashicorp/go-metrics"
+	"github.com/prince776/go-dst-kit/dst"
 )
 
 // SnapshotMeta is for metadata of a snapshot.
@@ -72,32 +73,44 @@ type SnapshotSink interface {
 // main goroutines, so that snapshots do not block normal operation.
 func (r *Raft) runSnapshots() {
 	for {
-		select {
-		case <-randomTimeout(r.config().SnapshotInterval):
-			// Check if we should snapshot
-			if !r.shouldSnapshot() {
-				continue
-			}
-
-			// Trigger a snapshot
-			if _, err := r.takeSnapshot(); err != nil && !errors.Is(err, ErrNothingNewToSnapshot) {
-				r.logger.Error("failed to take snapshot", "error", err)
-			}
-
-		case future := <-r.userSnapshotCh:
-			// User-triggered, run immediately
-			id, err := r.takeSnapshot()
-			if err != nil && !errors.Is(err, ErrNothingNewToSnapshot) {
-				r.logger.Error("failed to take snapshot", "error", err)
-			} else if err == nil {
-				future.opener = func() (*SnapshotMeta, io.ReadCloser, error) {
-					return r.snapshots.Open(id)
+		{
+			var sel1 int
+			var sel1v2 *userSnapshotFuture
+			dst.Select(r.w,
+				dst.OnRecv(randomTimeout(r.w, r.config().SnapshotInterval), func(_ time.Time, _ bool) { sel1 = 1 }),
+				dst.OnRecv(r.userSnapshotCh, func(v *userSnapshotFuture, _ bool) { sel1 = 2; sel1v2 = v }),
+				dst.OnRecv(r.shutdownCh, func(_ struct{}, _ bool) { sel1 = 3 }),
+			)
+			switch sel1 {
+			case 1:
+				// Check if we should snapshot
+				if !r.shouldSnapshot() {
+					continue
 				}
-			}
-			future.respond(err)
 
-		case <-r.shutdownCh:
-			return
+				// Trigger a snapshot
+				if _, err := r.takeSnapshot(); err != nil && !errors.Is(err, ErrNothingNewToSnapshot) {
+					r.logger.Error("failed to take snapshot", "error", err)
+				}
+
+			case 2:
+				future := sel1v2
+				// User-triggered, run immediately
+				id, err := r.takeSnapshot()
+				if err != nil && !errors.Is(err, ErrNothingNewToSnapshot) {
+					r.logger.Error("failed to take snapshot", "error", err)
+				} else if err == nil {
+					future.opener = func() (*SnapshotMeta, io.ReadCloser, error) {
+						return r.snapshots.Open(id)
+					}
+				}
+				future.respond(err)
+
+			case 3:
+				return
+			default:
+				panic("dstmigrate: no select case ran")
+			}
 		}
 	}
 }
@@ -124,17 +137,26 @@ func (r *Raft) shouldSnapshot() bool {
 // the snapshot thread, never the main thread. This returns the ID of the new
 // snapshot, along with an error.
 func (r *Raft) takeSnapshot() (string, error) {
-	defer metrics.MeasureSince([]string{"raft", "snapshot", "takeSnapshot"}, time.Now())
+	defer metrics.MeasureSince([]string{"raft", "snapshot", "takeSnapshot"}, r.w.Now())
 
 	// Create a request for the FSM to perform a snapshot.
 	snapReq := &reqSnapshotFuture{}
 	snapReq.init(r.w)
 
 	// Wait for dispatch or shutdown.
-	select {
-	case r.fsmSnapshotCh <- snapReq:
-	case <-r.shutdownCh:
-		return "", ErrRaftShutdown
+	{
+		var sel2 int
+		dst.Select(r.w,
+			dst.OnSend(r.fsmSnapshotCh, snapReq, func() { sel2 = 1 }),
+			dst.OnRecv(r.shutdownCh, func(_ struct{}, _ bool) { sel2 = 2 }),
+		)
+		switch sel2 {
+		case 1:
+		case 2:
+			return "", ErrRaftShutdown
+		default:
+			panic("dstmigrate: no select case ran")
+		}
 	}
 
 	// Wait until we get a response
@@ -152,10 +174,19 @@ func (r *Raft) takeSnapshot() (string, error) {
 	configReq := &configurationsFuture{}
 	configReq.ShutdownCh = r.shutdownCh
 	configReq.init(r.w)
-	select {
-	case r.configurationsCh <- configReq:
-	case <-r.shutdownCh:
-		return "", ErrRaftShutdown
+	{
+		var sel3 int
+		dst.Select(r.w,
+			dst.OnSend(r.configurationsCh, configReq, func() { sel3 = 1 }),
+			dst.OnRecv(r.shutdownCh, func(_ struct{}, _ bool) { sel3 = 2 }),
+		)
+		switch sel3 {
+		case 1:
+		case 2:
+			return "", ErrRaftShutdown
+		default:
+			panic("dstmigrate: no select case ran")
+		}
 	}
 	if err := configReq.Error(); err != nil {
 		return "", err
@@ -178,7 +209,7 @@ func (r *Raft) takeSnapshot() (string, error) {
 
 	// Create a new snapshot.
 	r.logger.Info("starting snapshot up to", "index", snapReq.index)
-	start := time.Now()
+	start := r.w.Now()
 	version := getSnapshotVersion(r.protocolVersion)
 	sink, err := r.snapshots.Create(version, snapReq.index, snapReq.term, committed, committedIndex, r.trans)
 	if err != nil {
@@ -187,7 +218,7 @@ func (r *Raft) takeSnapshot() (string, error) {
 	metrics.MeasureSince([]string{"raft", "snapshot", "create"}, start)
 
 	// Try to persist the snapshot.
-	start = time.Now()
+	start = r.w.Now()
 	if err := snapReq.snapshot.Persist(sink); err != nil {
 		_ = sink.Cancel()
 		return "", fmt.Errorf("failed to persist snapshot: %v", err)
@@ -251,7 +282,7 @@ func (r *Raft) compactLogsWithTrailing(snapIdx uint64, lastLogIdx uint64, traili
 // compactLogs takes the last inclusive index of a snapshot
 // and trims the logs that are no longer needed.
 func (r *Raft) compactLogs(snapIdx uint64) error {
-	defer metrics.MeasureSince([]string{"raft", "compactLogs"}, time.Now())
+	defer metrics.MeasureSince([]string{"raft", "compactLogs"}, r.w.Now())
 
 	lastLogIdx, _ := r.getLastLog()
 	trailingLogs := r.config().TrailingLogs
@@ -263,7 +294,7 @@ func (r *Raft) compactLogs(snapIdx uint64) error {
 // MonotonicLogStores after restore. Callers should verify that the store
 // implementation is monotonic prior to calling.
 func (r *Raft) removeOldLogs() error {
-	defer metrics.MeasureSince([]string{"raft", "removeOldLogs"}, time.Now())
+	defer metrics.MeasureSince([]string{"raft", "removeOldLogs"}, r.w.Now())
 
 	lastLogIdx, err := r.logs.LastIndex()
 	if err != nil {

@@ -7,12 +7,14 @@ import (
 	"bytes"
 	crand "crypto/rand"
 	"fmt"
+	"github.com/prince776/go-dst-kit/realworld"
 	"math"
 	"math/big"
-	"math/rand"
+	"sync"
 	"time"
 
 	"github.com/hashicorp/go-msgpack/v2/codec"
+	"github.com/prince776/go-dst-kit/dst"
 )
 
 // returns an int64 from a crypto random source
@@ -26,12 +28,12 @@ func newSeed() int64 {
 }
 
 // randomTimeout returns a value that is between the minVal and 2x minVal.
-func randomTimeout(minVal time.Duration) <-chan time.Time {
+func randomTimeout(w *dst.World, minVal time.Duration) dst.Chan[time.Time] {
 	if minVal == 0 {
-		return nil
+		return dst.Chan[time.Time]{}
 	}
-	extra := time.Duration(rand.Int63()) % minVal
-	return time.After(minVal + extra)
+	extra := time.Duration(w.Rand().Int64()) % minVal
+	return w.After(minVal + extra)
 }
 
 // min returns the minimum.
@@ -51,9 +53,9 @@ func max(a, b uint64) uint64 {
 }
 
 // generateUUID is used to generate a random UUID.
-func generateUUID() string {
+func generateUUID(w *dst.World) string {
 	buf := make([]byte, 16)
-	if _, err := crand.Read(buf); err != nil {
+	if _, err := w.Rand().CryptoRead(buf); err != nil {
 		panic(fmt.Errorf("failed to read random bytes: %v", err))
 	}
 
@@ -67,22 +69,15 @@ func generateUUID() string {
 
 // asyncNotifyCh is used to do an async channel send
 // to a single channel without blocking.
-func asyncNotifyCh(ch chan struct{}) {
-	select {
-	case ch <- struct{}{}:
-	default:
-	}
+func asyncNotifyCh(ch dst.Chan[struct{}]) {
+	ch.TrySend(struct{}{})
 }
 
 // drainNotifyCh empties out a single-item notification channel without
 // blocking, and returns whether it received anything.
-func drainNotifyCh(ch chan struct{}) bool {
-	select {
-	case <-ch:
-		return true
-	default:
-		return false
-	}
+func drainNotifyCh(ch dst.Chan[struct{}]) bool {
+	_, _, got := ch.TryRecv()
+	return got
 }
 
 // overrideNotifyBool is used to notify on a bool channel
@@ -90,17 +85,15 @@ func drainNotifyCh(ch chan struct{}) bool {
 // ch must be 1-item buffered channel.
 //
 // This method does not support multiple concurrent calls.
-func overrideNotifyBool(ch chan bool, v bool) {
-	select {
-	case ch <- v:
-		// value sent, all done
-	case <-ch:
-		// channel had an old value
-		select {
-		case ch <- v:
-		default:
-			panic("race: channel was sent concurrently")
-		}
+func overrideNotifyBool(ch dst.Chan[bool], v bool) {
+	// ch is 1-buffered: empty, the send goes through; full, there is an old
+	// value to take first.
+	if ch.TrySend(v) {
+		return // value sent, all done
+	}
+	ch.TryRecv() // channel had an old value
+	if !ch.TrySend(v) {
+		panic("race: channel was sent concurrently")
 	}
 }
 
@@ -158,3 +151,7 @@ type uint64Slice []uint64
 func (p uint64Slice) Len() int           { return len(p) }
 func (p uint64Slice) Less(i, j int) bool { return p[i] < p[j] }
 func (p uint64Slice) Swap(i, j int)      { p[i], p[j] = p[j], p[i] }
+
+// theRealWorld is the real World, for code with no World of its own (a
+// default, or a test helper).
+var theRealWorld = sync.OnceValue(func() *dst.World { return realworld.New(realworld.Options{}) })

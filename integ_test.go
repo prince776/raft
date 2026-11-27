@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/hashicorp/go-hclog"
+	"github.com/prince776/go-dst-kit/dst"
 	"github.com/stretchr/testify/require"
 )
 
@@ -129,10 +130,11 @@ func MakeRaft(tb testing.TB, conf *Config, bootstrap bool) *RaftEnv {
 }
 
 func WaitFor(env *RaftEnv, state RaftState) error {
-	limit := time.Now().Add(200 * time.Millisecond)
+	limit := theRealWorld().Now().Add(200 * time.Millisecond)
 	for env.raft.State() != state {
-		if time.Now().Before(limit) {
-			time.Sleep(10 * time.Millisecond)
+		if theRealWorld().Now().Before(limit) {
+			theRealWorld().Sleep(10 * time.Millisecond)
+
 		} else {
 			return fmt.Errorf("failed to transition to state %v", state)
 		}
@@ -141,26 +143,28 @@ func WaitFor(env *RaftEnv, state RaftState) error {
 }
 
 func WaitForAny(state RaftState, envs []*RaftEnv) (*RaftEnv, error) {
-	limit := time.Now().Add(200 * time.Millisecond)
+	limit := theRealWorld().Now().Add(200 * time.Millisecond)
 CHECK:
 	for _, env := range envs {
 		if env.raft.State() == state {
 			return env, nil
 		}
 	}
-	if time.Now().Before(limit) {
+	if theRealWorld().Now().Before(limit) {
 		goto WAIT
 	}
 	return nil, fmt.Errorf("failed to find node in %v state", state)
 WAIT:
-	time.Sleep(10 * time.Millisecond)
+	theRealWorld().Sleep(10 * time.Millisecond)
+
 	goto CHECK
 }
 
 func WaitFuture(f Future) error {
-	timer := time.AfterFunc(1000*time.Millisecond, func() {
+	timer := theRealWorld().AfterFunc(1000*time.Millisecond, func() {
 		panic(fmt.Errorf("timeout waiting for future %v", f))
 	})
+
 	defer timer.Stop()
 	return f.Error()
 }
@@ -173,7 +177,7 @@ func NoErr(err error, tb testing.TB) {
 }
 
 func CheckConsistent(envs []*RaftEnv, t *testing.T) {
-	limit := time.Now().Add(400 * time.Millisecond)
+	limit := theRealWorld().Now().Add(400 * time.Millisecond)
 	first := envs[0]
 	first.fsm.Lock()
 	defer first.fsm.Unlock()
@@ -201,11 +205,12 @@ CHECK:
 	}
 	return
 ERR:
-	if time.Now().After(limit) {
+	if theRealWorld().Now().After(limit) {
 		t.Fatalf("%v", err)
 	}
 	first.fsm.Unlock()
-	time.Sleep(20 * time.Millisecond)
+	theRealWorld().Sleep(20 * time.Millisecond)
+
 	first.fsm.Lock()
 	goto CHECK
 }
@@ -287,20 +292,22 @@ func TestRaft_Integ(t *testing.T) {
 
 	// snapshot the leader [leaders log should be compacted past the disconnected follower log now]
 	NoErr(WaitFuture(leader.raft.Snapshot()), t)
+	theRealWorld(
 
 	// Unfortunately we need to wait for the leader to start backing off RPCs to the down follower
 	// such that when the follower comes back up it'll run an election before it gets an rpc from
 	// the leader
-	time.Sleep(time.Second * 5)
+	).Sleep(time.Second * 5)
 
 	// start the now out of date follower back up
 	disconnected.Restart(t)
 
 	// wait for it to get caught up
-	timeout := time.Now().Add(time.Second * 10)
+	timeout := theRealWorld().Now().Add(time.Second * 10)
 	for disconnected.raft.getLastApplied() < leader.raft.getLastApplied() {
-		time.Sleep(time.Millisecond)
-		if time.Now().After(timeout) {
+		theRealWorld().Sleep(time.Millisecond)
+
+		if theRealWorld().Now().After(timeout) {
 			t.Fatalf("Gave up waiting for follower to get caught up to leader")
 		}
 	}
@@ -312,7 +319,7 @@ func TestRaft_Integ(t *testing.T) {
 	rm1.Release()
 	rm2.Release()
 	envs = envs[2:]
-	time.Sleep(10 * time.Millisecond)
+	theRealWorld().Sleep(10 * time.Millisecond)
 
 	// Wait for a leader
 	leader, err = WaitForAny(Leader, append([]*RaftEnv{env1}, envs...))
@@ -343,7 +350,7 @@ func TestRaft_Integ(t *testing.T) {
 
 	// Shoot the leader
 	env1.Release()
-	time.Sleep(3 * conf.HeartbeatTimeout)
+	theRealWorld().Sleep(3 * conf.HeartbeatTimeout)
 
 	// Wait for a leader
 	_, err = WaitForAny(Leader, envs)
@@ -402,10 +409,11 @@ func TestRaft_RestartFollower_LongInitialHeartbeat(t *testing.T) {
 			NoErr(err, t)
 
 			CheckConsistent(append([]*RaftEnv{env1}, envs...), t)
+			theRealWorld(
 			// TODO without this sleep, the restarted follower doesn't have any stored config
 			// and aborts the election because it doesn't know of any peers.  Shouldn't
 			// CheckConsistent prevent that?
-			time.Sleep(time.Second)
+			).Sleep(time.Second)
 
 			// shutdown a follower
 			disconnected := envs[len(envs)-1]
@@ -413,33 +421,34 @@ func TestRaft_RestartFollower_LongInitialHeartbeat(t *testing.T) {
 			disconnected.Shutdown()
 
 			seeNewLeader := func(o *Observation) bool { _, ok := o.Data.(LeaderObservation); return ok }
-			leaderCh := make(chan Observation)
+			leaderCh := dst.MakeChan[Observation](theRealWorld(), 0)
 			// TODO Closing this channel results in panics, even though we're calling Release.
 			// defer close(leaderCh)
 			leaderChanges := new(uint32)
-			go func() {
-				for range leaderCh {
+			theRealWorld().Go(func() {
+				for range leaderCh.All() {
 					atomic.AddUint32(leaderChanges, 1)
 				}
-			}()
+			})
 
-			requestVoteCh := make(chan Observation)
+			requestVoteCh := dst.MakeChan[Observation](theRealWorld(), 0)
 			seeRequestVote := func(o *Observation) bool { _, ok := o.Data.(RequestVoteRequest); return ok }
 			requestVotes := new(uint32)
-			go func() {
-				for range requestVoteCh {
+			theRealWorld().Go(func() {
+				for range requestVoteCh.All() {
 					atomic.AddUint32(requestVotes, 1)
 				}
-			}()
+			})
 
 			for _, env := range allEnvs {
 				env.raft.RegisterObserver(NewObserver(leaderCh, false, seeNewLeader))
 			}
+			theRealWorld(
 
 			// Unfortunately we need to wait for the leader to start backing off RPCs to the down follower
 			// such that when the follower comes back up it'll run an election before it gets an rpc from
 			// the leader
-			time.Sleep(time.Second * 5)
+			).Sleep(time.Second * 5)
 
 			if tt.restartInitialTimeouts != 0 {
 				disconnected.conf.HeartbeatTimeout = tt.restartInitialTimeouts
@@ -447,8 +456,7 @@ func TestRaft_RestartFollower_LongInitialHeartbeat(t *testing.T) {
 			}
 			disconnected.logger.Info("restarting follower")
 			disconnected.Restart(t)
-
-			time.Sleep(time.Second * 2)
+			theRealWorld().Sleep(time.Second * 2)
 
 			if tt.expectNewLeader {
 				require.NotEqual(t, 0, atomic.LoadUint32(leaderChanges))
@@ -467,8 +475,10 @@ func TestRaft_RestartFollower_LongInitialHeartbeat(t *testing.T) {
 						ElectionTimeout:   250 * time.Millisecond,
 					}), t)
 				}
+				theRealWorld(
 				// Make sure that reload by itself doesn't trigger a vote
-				time.Sleep(300 * time.Millisecond)
+				).Sleep(300 * time.Millisecond)
+
 				require.Equal(t, uint32(0), atomic.LoadUint32(requestVotes))
 
 				// Stop the leader, ensure that we don't see a request vote within the first 50ms
@@ -479,9 +489,11 @@ func TestRaft_RestartFollower_LongInitialHeartbeat(t *testing.T) {
 				// be triggered.
 				env1.logger.Info("stopping leader")
 				env1.Shutdown()
-				time.Sleep(50 * time.Millisecond)
+				theRealWorld().Sleep(50 * time.Millisecond)
+
 				require.Equal(t, uint32(0), atomic.LoadUint32(requestVotes))
-				time.Sleep(600 * time.Millisecond)
+				theRealWorld().Sleep(600 * time.Millisecond)
+
 				require.NotEqual(t, uint32(0), atomic.LoadUint32(requestVotes))
 			}
 
@@ -534,9 +546,10 @@ func TestRaft_PreVote_LeaderSpam(t *testing.T) {
 	// those requests should be granted as long as the leader haven't changed.
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	go func() {
+	theRealWorld().Go(func() {
 		for {
-			ticker := time.NewTicker(conf.HeartbeatTimeout / 2)
+			ticker := theRealWorld().NewTicker(conf.HeartbeatTimeout / 2)
+
 			for _, f := range followers {
 				rsp := RequestPreVoteResponse{}
 				reqPreVote := RequestPreVoteRequest{
@@ -549,14 +562,23 @@ func TestRaft_PreVote_LeaderSpam(t *testing.T) {
 				// it will start failing with "rejecting pre-vote request since we have a leader"
 				_ = leaderT.(WithPreVote).RequestPreVote(f.raft.localID, f.raft.localAddr, &reqPreVote, &rsp)
 			}
-			select {
-			case <-ticker.C:
-			case <-ctx.Done():
-				return
+			{
+				var sel1 int
+				dst.Select(theRealWorld(),
+					dst.OnRecv(ticker.C, func(_ time.Time, _ bool) { sel1 = 1 }),
+					dst.OnDone(ctx, func() { sel1 = 2 }),
+				)
+				switch sel1 {
+				case 1:
+				case 2:
+					return
+				default:
+					panic("dstmigrate: no select case ran")
+				}
 			}
 		}
-	}()
-	time.Sleep(time.Second)
+	})
+	theRealWorld().Sleep(time.Second)
 
 	// for all followers ignore heartbeat from current leader, so we can transition to candidate state.
 	// the purpose of this test is to verify that spamming nodes with pre-votes don't cause them to never
@@ -581,7 +603,8 @@ func TestRaft_PreVote_LeaderSpam(t *testing.T) {
 			}
 		})
 	}
-	time.Sleep(1 * time.Second)
+	theRealWorld().Sleep(1 * time.Second)
+
 	// New leader should be one of the  former followers.
 	_, err = WaitForAny(Leader, followers)
 	NoErr(err, t)

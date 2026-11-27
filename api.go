@@ -8,12 +8,12 @@ import (
 	"fmt"
 	"io"
 	"strconv"
-	"sync"
 	"sync/atomic"
 	"time"
 
 	hclog "github.com/hashicorp/go-hclog"
 	metrics "github.com/hashicorp/go-metrics"
+	"github.com/prince776/go-dst-kit/dst"
 )
 
 const (
@@ -90,7 +90,7 @@ type Raft struct {
 
 	// applyCh is used to async send logs to the main thread to
 	// be committed and applied to the FSM.
-	applyCh chan *logFuture
+	applyCh dst.Chan[*logFuture]
 
 	// conf stores the current configuration to use. This is the most recent one
 	// provided. All reads of config values should use the config() helper method
@@ -100,7 +100,7 @@ type Raft struct {
 	// confReloadMu ensures that only one thread can reload config at once since
 	// we need to read-modify-write the atomic. It is NOT necessary to hold this
 	// for any other operation e.g. reading config using config().
-	confReloadMu sync.Mutex
+	confReloadMu dst.Mutex
 
 	// FSM is the client state machine to apply commands to
 	fsm FSM
@@ -112,24 +112,24 @@ type Raft struct {
 	// restores so that we finish applying any old log applies before we
 	// take a user snapshot on the leader, otherwise we might restore the
 	// snapshot and apply old logs to it that were in the pipe.
-	fsmMutateCh chan interface{}
+	fsmMutateCh dst.Chan[interface{}]
 
 	// fsmSnapshotCh is used to trigger a new snapshot being taken
-	fsmSnapshotCh chan *reqSnapshotFuture
+	fsmSnapshotCh dst.Chan[*reqSnapshotFuture]
 
 	// lastContact is the last time we had contact from the
 	// leader node. This can be used to gauge staleness.
 	lastContact     time.Time
-	lastContactLock sync.RWMutex
+	lastContactLock dst.RWMutex
 
 	// leaderAddr is the current cluster leader Address
 	leaderAddr ServerAddress
 	// LeaderID is the current cluster leader ID
 	leaderID   ServerID
-	leaderLock sync.RWMutex
+	leaderLock dst.RWMutex
 
 	// leaderCh is used to notify of leadership changes
-	leaderCh chan bool
+	leaderCh dst.Chan[bool]
 
 	// leaderState used only while state is leader
 	leaderState leaderState
@@ -153,7 +153,7 @@ type Raft struct {
 	logs LogStore
 
 	// Used to request the leader to make configuration changes.
-	configurationChangeCh chan *configurationChangeFuture
+	configurationChangeCh dst.Chan[*configurationChangeFuture]
 
 	// Tracks the latest configuration and latest committed configuration from
 	// the log/snapshot.
@@ -164,22 +164,22 @@ type Raft struct {
 	latestConfiguration atomic.Value
 
 	// RPC chan comes from the transport layer
-	rpcCh <-chan RPC
+	rpcCh dst.Chan[RPC]
 
 	// Shutdown channel to exit, protected to prevent concurrent exits
 	shutdown     bool
-	shutdownCh   chan struct{}
-	shutdownLock sync.Mutex
+	shutdownCh   dst.Chan[struct{}]
+	shutdownLock dst.Mutex
 
 	// snapshots is used to store and retrieve snapshots
 	snapshots SnapshotStore
 
 	// userSnapshotCh is used for user-triggered snapshots
-	userSnapshotCh chan *userSnapshotFuture
+	userSnapshotCh dst.Chan[*userSnapshotFuture]
 
 	// userRestoreCh is used for user-triggered restores of external
 	// snapshots
-	userRestoreCh chan *userRestoreFuture
+	userRestoreCh dst.Chan[*userRestoreFuture]
 
 	// stable is a StableStore implementation for durable state
 	// It provides stable storage for many fields in raftState
@@ -190,30 +190,30 @@ type Raft struct {
 
 	// verifyCh is used to async send verify futures to the main thread
 	// to verify we are still the leader
-	verifyCh chan *verifyFuture
+	verifyCh dst.Chan[*verifyFuture]
 
 	// configurationsCh is used to get the configuration data safely from
 	// outside of the main thread.
-	configurationsCh chan *configurationsFuture
+	configurationsCh dst.Chan[*configurationsFuture]
 
 	// bootstrapCh is used to attempt an initial bootstrap from outside of
 	// the main thread.
-	bootstrapCh chan *bootstrapFuture
+	bootstrapCh dst.Chan[*bootstrapFuture]
 
 	// List of observers and the mutex that protects them. The observers list
 	// is indexed by an artificial ID which is used for deregistration.
-	observersLock sync.RWMutex
+	observersLock dst.RWMutex
 	observers     map[uint64]*Observer
 
 	// leadershipTransferCh is used to start a leadership transfer from outside of
 	// the main thread.
-	leadershipTransferCh chan *leadershipTransferFuture
+	leadershipTransferCh dst.Chan[*leadershipTransferFuture]
 
 	// leaderNotifyCh is used to tell leader that config has changed
-	leaderNotifyCh chan struct{}
+	leaderNotifyCh dst.Chan[struct{}]
 
 	// followerNotifyCh is used to tell followers that config has changed
-	followerNotifyCh chan struct{}
+	followerNotifyCh dst.Chan[struct{}]
 
 	// mainThreadSaturation measures the saturation of the main raft goroutine.
 	mainThreadSaturation *saturationMetric
@@ -376,7 +376,7 @@ func RecoverCluster(conf *Config, fsm FSM, logs LogStore, stable StableStore,
 			"size-in-bytes", snapshot.Size,
 		)
 		crc := newCountingReadCloser(source)
-		monitor := startSnapshotRestoreMonitor(snapLogger, crc, snapshot.Size, false)
+		monitor := startSnapshotRestoreMonitor(conf.worldOrReal(), snapLogger, crc, snapshot.Size, false)
 		err = fsm.Restore(crc)
 		// Close the source after the restore has completed
 		_ = source.Close()
@@ -506,6 +506,12 @@ func HasExistingState(logs LogStore, stable StableStore, snaps SnapshotStore) (b
 // old state, such as snapshots, logs, peers, etc, all those will be restored
 // when creating the Raft node.
 func NewRaft(conf *Config, fsm FSM, logs LogStore, stable StableStore, snaps SnapshotStore, trans Transport) (*Raft, error) {
+	// The World raft runs in: the real one unless the config says.
+	w := conf.World
+	if w == nil {
+		w = theRealWorld()
+	}
+
 	// Validate the configuration.
 	if err := ValidateConfig(conf); err != nil {
 		return nil, err
@@ -546,9 +552,9 @@ func NewRaft(conf *Config, fsm FSM, logs LogStore, stable StableStore, snaps Sna
 	}
 
 	// Buffer applyCh to MaxAppendEntries if the option is enabled
-	applyCh := make(chan *logFuture)
+	applyCh := dst.MakeChan[*logFuture](w, 0)
 	if conf.BatchApplyCh {
-		applyCh = make(chan *logFuture, conf.MaxAppendEntries)
+		applyCh = dst.MakeChan[*logFuture](w, conf.MaxAppendEntries)
 	}
 
 	_, transportSupportPreVote := trans.(WithPreVote)
@@ -557,30 +563,30 @@ func NewRaft(conf *Config, fsm FSM, logs LogStore, stable StableStore, snaps Sna
 		protocolVersion:       protocolVersion,
 		applyCh:               applyCh,
 		fsm:                   fsm,
-		fsmMutateCh:           make(chan interface{}, 128),
-		fsmSnapshotCh:         make(chan *reqSnapshotFuture),
-		leaderCh:              make(chan bool, 1),
+		fsmMutateCh:           dst.MakeChan[interface{}](w, 128),
+		fsmSnapshotCh:         dst.MakeChan[*reqSnapshotFuture](w, 0),
+		leaderCh:              dst.MakeChan[bool](w, 1),
 		localID:               localID,
 		localAddr:             localAddr,
 		logger:                logger,
 		logs:                  logs,
-		configurationChangeCh: make(chan *configurationChangeFuture),
+		configurationChangeCh: dst.MakeChan[*configurationChangeFuture](w, 0),
 		configurations:        configurations{},
 		rpcCh:                 trans.Consumer(),
 		snapshots:             snaps,
-		userSnapshotCh:        make(chan *userSnapshotFuture),
-		userRestoreCh:         make(chan *userRestoreFuture),
-		shutdownCh:            make(chan struct{}),
+		userSnapshotCh:        dst.MakeChan[*userSnapshotFuture](w, 0),
+		userRestoreCh:         dst.MakeChan[*userRestoreFuture](w, 0),
+		shutdownCh:            dst.MakeChan[struct{}](w, 0),
 		stable:                stable,
 		trans:                 trans,
-		verifyCh:              make(chan *verifyFuture, 64),
-		configurationsCh:      make(chan *configurationsFuture, 8),
-		bootstrapCh:           make(chan *bootstrapFuture),
+		verifyCh:              dst.MakeChan[*verifyFuture](w, 64),
+		configurationsCh:      dst.MakeChan[*configurationsFuture](w, 8),
+		bootstrapCh:           dst.MakeChan[*bootstrapFuture](w, 0),
 		observers:             make(map[uint64]*Observer),
-		leadershipTransferCh:  make(chan *leadershipTransferFuture, 1),
-		leaderNotifyCh:        make(chan struct{}, 1),
-		followerNotifyCh:      make(chan struct{}, 1),
-		mainThreadSaturation:  newSaturationMetric([]string{"raft", "thread", "main", "saturation"}, 1*time.Second),
+		leadershipTransferCh:  dst.MakeChan[*leadershipTransferFuture](w, 1),
+		leaderNotifyCh:        dst.MakeChan[struct{}](w, 1),
+		followerNotifyCh:      dst.MakeChan[struct{}](w, 1),
+		mainThreadSaturation:  newSaturationMetric(w, []string{"raft", "thread", "main", "saturation"}, 1*time.Second),
 		preVoteDisabled:       conf.PreVoteDisabled || !transportSupportPreVote,
 		noLegacyTelemetry:     conf.NoLegacyTelemetry,
 		RestoreCommittedLogs:  conf.RestoreCommittedLogs,
@@ -589,6 +595,7 @@ func NewRaft(conf *Config, fsm FSM, logs LogStore, stable StableStore, snaps Sna
 		r.logger.Warn("pre-vote is disabled because it is not supported by the Transport")
 	}
 
+	r.w = w
 	r.conf.Store(*conf)
 
 	// Initialize as a follower.
@@ -708,7 +715,7 @@ func (r *Raft) tryRestoreSingleSnapshot(snapshot *SnapshotMeta) bool {
 		return false
 	}
 
-	if err := fsmRestoreAndMeasure(snapLogger, r.fsm, source, snapshot.Size); err != nil {
+	if err := fsmRestoreAndMeasure(r.w, snapLogger, r.fsm, source, snapshot.Size); err != nil {
 		_ = source.Close()
 		snapLogger.Error("failed to restore snapshot", "error", err)
 		return false
@@ -818,11 +825,20 @@ func (r *Raft) BootstrapCluster(configuration Configuration) Future {
 	bootstrapReq := &bootstrapFuture{}
 	bootstrapReq.init(r.w)
 	bootstrapReq.configuration = configuration
-	select {
-	case <-r.shutdownCh:
-		return errorFuture{ErrRaftShutdown}
-	case r.bootstrapCh <- bootstrapReq:
-		return bootstrapReq
+	{
+		var sel1 int
+		dst.Select(r.w,
+			dst.OnRecv(r.shutdownCh, func(_ struct{}, _ bool) { sel1 = 1 }),
+			dst.OnSend(r.bootstrapCh, bootstrapReq, func() { sel1 = 2 }),
+		)
+		switch sel1 {
+		case 1:
+			return errorFuture{ErrRaftShutdown}
+		case 2:
+			return bootstrapReq
+		default:
+			panic("dstmigrate: no select case ran")
+		}
 	}
 }
 
@@ -874,9 +890,9 @@ func (r *Raft) Apply(cmd []byte, timeout time.Duration) ApplyFuture {
 func (r *Raft) ApplyLog(log Log, timeout time.Duration) ApplyFuture {
 	metrics.IncrCounter([]string{"raft", "apply"}, 1)
 
-	var timer <-chan time.Time
+	var timer dst.Chan[time.Time]
 	if timeout > 0 {
-		timer = time.After(timeout)
+		timer = r.w.After(timeout)
 	}
 
 	// Create a log future, no index or term yet
@@ -889,13 +905,23 @@ func (r *Raft) ApplyLog(log Log, timeout time.Duration) ApplyFuture {
 	}
 	logFuture.init(r.w)
 
-	select {
-	case <-timer:
-		return errorFuture{ErrEnqueueTimeout}
-	case <-r.shutdownCh:
-		return errorFuture{ErrRaftShutdown}
-	case r.applyCh <- logFuture:
-		return logFuture
+	{
+		var sel2 int
+		dst.Select(r.w,
+			dst.OnRecv(timer, func(_ time.Time, _ bool) { sel2 = 1 }),
+			dst.OnRecv(r.shutdownCh, func(_ struct{}, _ bool) { sel2 = 2 }),
+			dst.OnSend(r.applyCh, logFuture, func() { sel2 = 3 }),
+		)
+		switch sel2 {
+		case 1:
+			return errorFuture{ErrEnqueueTimeout}
+		case 2:
+			return errorFuture{ErrRaftShutdown}
+		case 3:
+			return logFuture
+		default:
+			panic("dstmigrate: no select case ran")
+		}
 	}
 }
 
@@ -906,22 +932,32 @@ func (r *Raft) ApplyLog(log Log, timeout time.Duration) ApplyFuture {
 // must be run on the leader, or it will fail.
 func (r *Raft) Barrier(timeout time.Duration) Future {
 	metrics.IncrCounter([]string{"raft", "barrier"}, 1)
-	var timer <-chan time.Time
+	var timer dst.Chan[time.Time]
 	if timeout > 0 {
-		timer = time.After(timeout)
+		timer = r.w.After(timeout)
 	}
 
 	// Create a log future, no index or term yet
 	logFuture := &logFuture{log: Log{Type: LogBarrier}}
 	logFuture.init(r.w)
 
-	select {
-	case <-timer:
-		return errorFuture{ErrEnqueueTimeout}
-	case <-r.shutdownCh:
-		return errorFuture{ErrRaftShutdown}
-	case r.applyCh <- logFuture:
-		return logFuture
+	{
+		var sel3 int
+		dst.Select(r.w,
+			dst.OnRecv(timer, func(_ time.Time, _ bool) { sel3 = 1 }),
+			dst.OnRecv(r.shutdownCh, func(_ struct{}, _ bool) { sel3 = 2 }),
+			dst.OnSend(r.applyCh, logFuture, func() { sel3 = 3 }),
+		)
+		switch sel3 {
+		case 1:
+			return errorFuture{ErrEnqueueTimeout}
+		case 2:
+			return errorFuture{ErrRaftShutdown}
+		case 3:
+			return logFuture
+		default:
+			panic("dstmigrate: no select case ran")
+		}
 	}
 }
 
@@ -932,11 +968,20 @@ func (r *Raft) VerifyLeader() Future {
 	metrics.IncrCounter([]string{"raft", "verify_leader"}, 1)
 	verifyFuture := &verifyFuture{}
 	verifyFuture.init(r.w)
-	select {
-	case <-r.shutdownCh:
-		return errorFuture{ErrRaftShutdown}
-	case r.verifyCh <- verifyFuture:
-		return verifyFuture
+	{
+		var sel4 int
+		dst.Select(r.w,
+			dst.OnRecv(r.shutdownCh, func(_ struct{}, _ bool) { sel4 = 1 }),
+			dst.OnSend(r.verifyCh, verifyFuture, func() { sel4 = 2 }),
+		)
+		switch sel4 {
+		case 1:
+			return errorFuture{ErrRaftShutdown}
+		case 2:
+			return verifyFuture
+		default:
+			panic("dstmigrate: no select case ran")
+		}
 	}
 }
 
@@ -1062,7 +1107,7 @@ func (r *Raft) Shutdown() Future {
 	defer r.shutdownLock.Unlock()
 
 	if !r.shutdown {
-		close(r.shutdownCh)
+		r.shutdownCh.Close()
 		r.shutdown = true
 		r.setState(Shutdown)
 		return &shutdownFuture{r}
@@ -1078,12 +1123,21 @@ func (r *Raft) Shutdown() Future {
 func (r *Raft) Snapshot() SnapshotFuture {
 	future := &userSnapshotFuture{}
 	future.init(r.w)
-	select {
-	case r.userSnapshotCh <- future:
-		return future
-	case <-r.shutdownCh:
-		future.respond(ErrRaftShutdown)
-		return future
+	{
+		var sel5 int
+		dst.Select(r.w,
+			dst.OnSend(r.userSnapshotCh, future, func() { sel5 = 1 }),
+			dst.OnRecv(r.shutdownCh, func(_ struct{}, _ bool) { sel5 = 2 }),
+		)
+		switch sel5 {
+		case 1:
+			return future
+		case 2:
+			future.respond(ErrRaftShutdown)
+			return future
+		default:
+			panic("dstmigrate: no select case ran")
+		}
 	}
 }
 
@@ -1103,9 +1157,9 @@ func (r *Raft) Snapshot() SnapshotFuture {
 // recovery into a fresh cluster, and should not be used in normal operations.
 func (r *Raft) Restore(meta *SnapshotMeta, reader io.Reader, timeout time.Duration) error {
 	metrics.IncrCounter([]string{"raft", "restore"}, 1)
-	var timer <-chan time.Time
+	var timer dst.Chan[time.Time]
 	if timeout > 0 {
-		timer = time.After(timeout)
+		timer = r.w.After(timeout)
 	}
 
 	// Perform the restore.
@@ -1114,15 +1168,25 @@ func (r *Raft) Restore(meta *SnapshotMeta, reader io.Reader, timeout time.Durati
 		reader: reader,
 	}
 	restore.init(r.w)
-	select {
-	case <-timer:
-		return ErrEnqueueTimeout
-	case <-r.shutdownCh:
-		return ErrRaftShutdown
-	case r.userRestoreCh <- restore:
-		// If the restore is ingested then wait for it to complete.
-		if err := restore.Error(); err != nil {
-			return err
+	{
+		var sel6 int
+		dst.Select(r.w,
+			dst.OnRecv(timer, func(_ time.Time, _ bool) { sel6 = 1 }),
+			dst.OnRecv(r.shutdownCh, func(_ struct{}, _ bool) { sel6 = 2 }),
+			dst.OnSend(r.userRestoreCh, restore, func() { sel6 = 3 }),
+		)
+		switch sel6 {
+		case 1:
+			return ErrEnqueueTimeout
+		case 2:
+			return ErrRaftShutdown
+		case 3:
+			// If the restore is ingested then wait for it to complete.
+			if err := restore.Error(); err != nil {
+				return err
+			}
+		default:
+			panic("dstmigrate: no select case ran")
 		}
 	}
 
@@ -1136,13 +1200,23 @@ func (r *Raft) Restore(meta *SnapshotMeta, reader io.Reader, timeout time.Durati
 		},
 	}
 	noop.init(r.w)
-	select {
-	case <-timer:
-		return ErrEnqueueTimeout
-	case <-r.shutdownCh:
-		return ErrRaftShutdown
-	case r.applyCh <- noop:
-		return noop.Error()
+	{
+		var sel7 int
+		dst.Select(r.w,
+			dst.OnRecv(timer, func(_ time.Time, _ bool) { sel7 = 1 }),
+			dst.OnRecv(r.shutdownCh, func(_ struct{}, _ bool) { sel7 = 2 }),
+			dst.OnSend(r.applyCh, noop, func() { sel7 = 3 }),
+		)
+		switch sel7 {
+		case 1:
+			return ErrEnqueueTimeout
+		case 2:
+			return ErrRaftShutdown
+		case 3:
+			return noop.Error()
+		default:
+			panic("dstmigrate: no select case ran")
+		}
 	}
 }
 
@@ -1162,7 +1236,7 @@ func (r *Raft) State() RaftState {
 // latest leadership transition. For example, if a receiver receives subsequent
 // `true` values, they may deduce that leadership was lost and regained while
 // the receiver was processing first leadership transition.
-func (r *Raft) LeaderCh() <-chan bool {
+func (r *Raft) LeaderCh() dst.Chan[bool] {
 	return r.leaderCh
 }
 
@@ -1218,7 +1292,7 @@ func (r *Raft) Stats() map[string]string {
 		"last_log_term":        toString(lastLogTerm),
 		"commit_index":         toString(r.getCommitIndex()),
 		"applied_index":        toString(r.getLastApplied()),
-		"fsm_pending":          toString(uint64(len(r.fsmMutateCh))),
+		"fsm_pending":          toString(uint64(r.fsmMutateCh.Len())),
 		"last_snapshot_index":  toString(lastSnapIndex),
 		"last_snapshot_term":   toString(lastSnapTerm),
 		"protocol_version":     toString(uint64(r.protocolVersion)),
@@ -1260,7 +1334,7 @@ func (r *Raft) Stats() map[string]string {
 	} else if last.IsZero() {
 		s["last_contact"] = "never"
 	} else {
-		s["last_contact"] = fmt.Sprintf("%v", time.Since(last))
+		s["last_contact"] = fmt.Sprintf("%v", r.w.Since(last))
 	}
 	return s
 }

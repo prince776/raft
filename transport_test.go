@@ -8,6 +8,8 @@ import (
 	"reflect"
 	"testing"
 	"time"
+
+	"github.com/prince776/go-dst-kit/dst"
 )
 
 const (
@@ -64,21 +66,32 @@ func TestTransport_AppendEntries(t *testing.T) {
 		}
 
 		// Listen for a request
-		go func() {
-			select {
-			case rpc := <-rpcCh:
-				// Verify the command
-				req := rpc.Command.(*AppendEntriesRequest)
-				if !reflect.DeepEqual(req, &args) {
-					t.Errorf("command mismatch: %#v %#v", *req, args)
-					return
-				}
-				rpc.Respond(&resp, nil)
+		theRealWorld().Go(func() {
+			{
+				var sel1 int
+				var sel1v1 RPC
+				dst.Select(theRealWorld(),
+					dst.OnRecv(rpcCh, func(v RPC, _ bool) { sel1 = 1; sel1v1 = v }),
+					dst.OnRecv(theRealWorld().After(200*time.Millisecond), func(_ time.Time, _ bool) { sel1 = 2 }),
+				)
+				switch sel1 {
+				case 1:
+					rpc := sel1v1
+					// Verify the command
+					req := rpc.Command.(*AppendEntriesRequest)
+					if !reflect.DeepEqual(req, &args) {
+						t.Errorf("command mismatch: %#v %#v", *req, args)
+						return
+					}
+					rpc.Respond(&resp, nil)
 
-			case <-time.After(200 * time.Millisecond):
-				t.Errorf("timeout")
+				case 2:
+					t.Errorf("timeout")
+				default:
+					panic("dstmigrate: no select case ran")
+				}
 			}
-		}()
+		})
 
 		// Transport 2 makes outbound request
 		addr2, trans2 := NewTestTransport(ttype, "")
@@ -128,24 +141,35 @@ func TestTransport_AppendEntriesPipeline(t *testing.T) {
 		}
 
 		// Listen for a request
-		go func() {
+		theRealWorld().Go(func() {
 			for i := 0; i < 10; i++ {
-				select {
-				case rpc := <-rpcCh:
-					// Verify the command
-					req := rpc.Command.(*AppendEntriesRequest)
-					if !reflect.DeepEqual(req, &args) {
-						t.Errorf("command mismatch: %#v %#v", *req, args)
-						return
-					}
-					rpc.Respond(&resp, nil)
+				{
+					var sel2 int
+					var sel2v1 RPC
+					dst.Select(theRealWorld(),
+						dst.OnRecv(rpcCh, func(v RPC, _ bool) { sel2 = 1; sel2v1 = v }),
+						dst.OnRecv(theRealWorld().After(200*time.Millisecond), func(_ time.Time, _ bool) { sel2 = 2 }),
+					)
+					switch sel2 {
+					case 1:
+						rpc := sel2v1
+						// Verify the command
+						req := rpc.Command.(*AppendEntriesRequest)
+						if !reflect.DeepEqual(req, &args) {
+							t.Errorf("command mismatch: %#v %#v", *req, args)
+							return
+						}
+						rpc.Respond(&resp, nil)
 
-				case <-time.After(200 * time.Millisecond):
-					t.Errorf("timeout")
-					return
+					case 2:
+						t.Errorf("timeout")
+						return
+					default:
+						panic("dstmigrate: no select case ran")
+					}
 				}
 			}
-		}()
+		})
 
 		// Transport 2 makes outbound request
 		addr2, trans2 := NewTestTransport(ttype, "")
@@ -168,14 +192,25 @@ func TestTransport_AppendEntriesPipeline(t *testing.T) {
 
 		respCh := pipeline.Consumer()
 		for i := 0; i < 10; i++ {
-			select {
-			case ready := <-respCh:
-				// Verify the response
-				if !reflect.DeepEqual(&resp, ready.Response()) {
-					t.Fatalf("command mismatch: %#v %#v", &resp, ready.Response())
+			{
+				var sel3 int
+				var sel3v1 AppendFuture
+				dst.Select(theRealWorld(),
+					dst.OnRecv(respCh, func(v AppendFuture, _ bool) { sel3 = 1; sel3v1 = v }),
+					dst.OnRecv(theRealWorld().After(200*time.Millisecond), func(_ time.Time, _ bool) { sel3 = 2 }),
+				)
+				switch sel3 {
+				case 1:
+					ready := sel3v1
+					// Verify the response
+					if !reflect.DeepEqual(&resp, ready.Response()) {
+						t.Fatalf("command mismatch: %#v %#v", &resp, ready.Response())
+					}
+				case 2:
+					t.Fatalf("timeout")
+				default:
+					panic("dstmigrate: no select case ran")
 				}
-			case <-time.After(200 * time.Millisecond):
-				t.Fatalf("timeout")
 			}
 		}
 	}
@@ -200,22 +235,33 @@ func TestTransport_RequestVote(t *testing.T) {
 		}
 
 		// Listen for a request
-		go func() {
-			select {
-			case rpc := <-rpcCh:
-				// Verify the command
-				req := rpc.Command.(*RequestVoteRequest)
-				if !reflect.DeepEqual(req, &args) {
-					t.Errorf("command mismatch: %#v %#v", *req, args)
-					return
+		theRealWorld().Go(func() {
+			{
+				var sel4 int
+				var sel4v1 RPC
+				dst.Select(theRealWorld(),
+					dst.OnRecv(rpcCh, func(v RPC, _ bool) { sel4 = 1; sel4v1 = v }),
+					dst.OnRecv(theRealWorld().After(200*time.Millisecond), func(_ time.Time, _ bool) { sel4 = 2 }),
+				)
+				switch sel4 {
+				case 1:
+					rpc := sel4v1
+					// Verify the command
+					req := rpc.Command.(*RequestVoteRequest)
+					if !reflect.DeepEqual(req, &args) {
+						t.Errorf("command mismatch: %#v %#v", *req, args)
+						return
+					}
+
+					rpc.Respond(&resp, nil)
+
+				case 2:
+					t.Errorf("timeout")
+				default:
+					panic("dstmigrate: no select case ran")
 				}
-
-				rpc.Respond(&resp, nil)
-
-			case <-time.After(200 * time.Millisecond):
-				t.Errorf("timeout")
 			}
-		}()
+		})
 
 		// Transport 2 makes outbound request
 		addr2, trans2 := NewTestTransport(ttype, "")
@@ -258,32 +304,43 @@ func TestTransport_InstallSnapshot(t *testing.T) {
 		}
 
 		// Listen for a request
-		go func() {
-			select {
-			case rpc := <-rpcCh:
-				// Verify the command
-				req := rpc.Command.(*InstallSnapshotRequest)
-				if !reflect.DeepEqual(req, &args) {
-					t.Errorf("command mismatch: %#v %#v", *req, args)
-					return
+		theRealWorld().Go(func() {
+			{
+				var sel5 int
+				var sel5v1 RPC
+				dst.Select(theRealWorld(),
+					dst.OnRecv(rpcCh, func(v RPC, _ bool) { sel5 = 1; sel5v1 = v }),
+					dst.OnRecv(theRealWorld().After(200*time.Millisecond), func(_ time.Time, _ bool) { sel5 = 2 }),
+				)
+				switch sel5 {
+				case 1:
+					rpc := sel5v1
+					// Verify the command
+					req := rpc.Command.(*InstallSnapshotRequest)
+					if !reflect.DeepEqual(req, &args) {
+						t.Errorf("command mismatch: %#v %#v", *req, args)
+						return
+					}
+
+					// Try to read the bytes
+					buf := make([]byte, 10)
+					_, _ = rpc.Reader.Read(buf)
+
+					// Compare
+					if !bytes.Equal(buf, []byte("0123456789")) {
+						t.Errorf("bad buf %v", buf)
+						return
+					}
+
+					rpc.Respond(&resp, nil)
+
+				case 2:
+					t.Errorf("timeout")
+				default:
+					panic("dstmigrate: no select case ran")
 				}
-
-				// Try to read the bytes
-				buf := make([]byte, 10)
-				_, _ = rpc.Reader.Read(buf)
-
-				// Compare
-				if !bytes.Equal(buf, []byte("0123456789")) {
-					t.Errorf("bad buf %v", buf)
-					return
-				}
-
-				rpc.Respond(&resp, nil)
-
-			case <-time.After(200 * time.Millisecond):
-				t.Errorf("timeout")
 			}
-		}()
+		})
 
 		// Transport 2 makes outbound request
 		addr2, trans2 := NewTestTransport(ttype, "")

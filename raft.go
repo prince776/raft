@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/hashicorp/go-hclog"
+	"github.com/prince776/go-dst-kit/dst"
 
 	"github.com/hashicorp/go-metrics"
 )
@@ -89,12 +90,12 @@ type commitTuple struct {
 // leaderState is state that is used while we are a leader.
 type leaderState struct {
 	leadershipTransferInProgress int32 // indicates that a leadership transfer is in progress.
-	commitCh                     chan struct{}
+	commitCh                     dst.Chan[struct{}]
 	commitment                   *commitment
 	inflight                     *list.List // list of logFuture in log index order
 	replState                    map[ServerID]*followerReplication
 	notify                       map[*verifyFuture]struct{}
-	stepDown                     chan struct{}
+	stepDown                     dst.Chan[struct{}]
 }
 
 // setLeader is used to modify the current leader Address and ID of the cluster
@@ -114,21 +115,31 @@ func (r *Raft) setLeader(leaderAddr ServerAddress, leaderID ServerID) {
 // configuration change requests. 'req' describes the change. For timeout,
 // see AddVoter.
 func (r *Raft) requestConfigChange(req configurationChangeRequest, timeout time.Duration) IndexFuture {
-	var timer <-chan time.Time
+	var timer dst.Chan[time.Time]
 	if timeout > 0 {
-		timer = time.After(timeout)
+		timer = r.w.After(timeout)
 	}
 	future := &configurationChangeFuture{
 		req: req,
 	}
 	future.init(r.w)
-	select {
-	case <-timer:
-		return errorFuture{ErrEnqueueTimeout}
-	case r.configurationChangeCh <- future:
-		return future
-	case <-r.shutdownCh:
-		return errorFuture{ErrRaftShutdown}
+	{
+		var sel1 int
+		dst.Select(r.w,
+			dst.OnRecv(timer, func(_ time.Time, _ bool) { sel1 = 1 }),
+			dst.OnSend(r.configurationChangeCh, future, func() { sel1 = 2 }),
+			dst.OnRecv(r.shutdownCh, func(_ struct{}, _ bool) { sel1 = 3 }),
+		)
+		switch sel1 {
+		case 1:
+			return errorFuture{ErrEnqueueTimeout}
+		case 2:
+			return future
+		case 3:
+			return errorFuture{ErrRaftShutdown}
+		default:
+			panic("dstmigrate: no select case ran")
+		}
 	}
 }
 
@@ -136,12 +147,21 @@ func (r *Raft) requestConfigChange(req configurationChangeRequest, timeout time.
 func (r *Raft) run() {
 	for {
 		// Check if we are doing a shutdown
-		select {
-		case <-r.shutdownCh:
-			// Clear the leader to prevent forwarding
-			r.setLeader("", "")
-			return
-		default:
+		{
+			var sel2 int
+			dst.Select(r.w,
+				dst.OnRecv(r.shutdownCh, func(_ struct{}, _ bool) { sel2 = 1 }),
+				dst.Default(func() { sel2 = 2 }),
+			)
+			switch sel2 {
+			case 1:
+				// Clear the leader to prevent forwarding
+				r.setLeader("", "")
+				return
+			case 2:
+			default:
+				panic("dstmigrate: no select case ran")
+			}
 		}
 
 		switch r.getState() {
@@ -161,97 +181,132 @@ func (r *Raft) runFollower() {
 	leaderAddr, leaderID := r.LeaderWithID()
 	r.logger.Info("entering follower state", "follower", r, "leader-address", leaderAddr, "leader-id", leaderID)
 	metrics.IncrCounter([]string{"raft", "state", "follower"}, 1)
-	heartbeatTimer := randomTimeout(r.config().HeartbeatTimeout)
+	heartbeatTimer := randomTimeout(r.w, r.config().HeartbeatTimeout)
 
 	for r.getState() == Follower {
 		r.mainThreadSaturation.sleeping()
 
-		select {
-		case rpc := <-r.rpcCh:
-			r.mainThreadSaturation.working()
-			r.processRPC(rpc)
+		{
+			var sel3 int
+			var sel3v1 RPC
+			var sel3v2 *configurationChangeFuture
+			var sel3v3 *logFuture
+			var sel3v4 *verifyFuture
+			var sel3v5 *userRestoreFuture
+			var sel3v6 *leadershipTransferFuture
+			var sel3v7 *configurationsFuture
+			var sel3v8 *bootstrapFuture
+			dst.Select(r.w,
+				dst.OnRecv(r.rpcCh, func(v RPC, _ bool) { sel3 = 1; sel3v1 = v }),
+				dst.OnRecv(r.configurationChangeCh, func(v *configurationChangeFuture, _ bool) { sel3 = 2; sel3v2 = v }),
+				dst.OnRecv(r.applyCh, func(v *logFuture, _ bool) { sel3 = 3; sel3v3 = v }),
+				dst.OnRecv(r.verifyCh, func(v *verifyFuture, _ bool) { sel3 = 4; sel3v4 = v }),
+				dst.OnRecv(r.userRestoreCh, func(v *userRestoreFuture, _ bool) { sel3 = 5; sel3v5 = v }),
+				dst.OnRecv(r.leadershipTransferCh, func(v *leadershipTransferFuture, _ bool) { sel3 = 6; sel3v6 = v }),
+				dst.OnRecv(r.configurationsCh, func(v *configurationsFuture, _ bool) { sel3 = 7; sel3v7 = v }),
+				dst.OnRecv(r.bootstrapCh, func(v *bootstrapFuture, _ bool) { sel3 = 8; sel3v8 = v }),
+				dst.OnRecv(r.leaderNotifyCh, func(_ struct{}, _ bool) { sel3 = 9 }),
+				dst.OnRecv(r.followerNotifyCh, func(_ struct{}, _ bool) { sel3 = 10 }),
+				dst.OnRecv(heartbeatTimer, func(_ time.Time, _ bool) { sel3 = 11 }),
+				dst.OnRecv(r.shutdownCh, func(_ struct{}, _ bool) { sel3 = 12 }),
+			)
+			switch sel3 {
+			case 1:
+				rpc := sel3v1
+				r.mainThreadSaturation.working()
+				r.processRPC(rpc)
 
-		case c := <-r.configurationChangeCh:
-			r.mainThreadSaturation.working()
-			// Reject any operations since we are not the leader
-			c.respond(ErrNotLeader)
+			case 2:
+				c := sel3v2
+				r.mainThreadSaturation.working()
+				// Reject any operations since we are not the leader
+				c.respond(ErrNotLeader)
 
-		case a := <-r.applyCh:
-			r.mainThreadSaturation.working()
-			// Reject any operations since we are not the leader
-			a.respond(ErrNotLeader)
+			case 3:
+				a := sel3v3
+				r.mainThreadSaturation.working()
+				// Reject any operations since we are not the leader
+				a.respond(ErrNotLeader)
 
-		case v := <-r.verifyCh:
-			r.mainThreadSaturation.working()
-			// Reject any operations since we are not the leader
-			v.respond(ErrNotLeader)
+			case 4:
+				v := sel3v4
+				r.mainThreadSaturation.working()
+				// Reject any operations since we are not the leader
+				v.respond(ErrNotLeader)
 
-		case ur := <-r.userRestoreCh:
-			r.mainThreadSaturation.working()
-			// Reject any restores since we are not the leader
-			ur.respond(ErrNotLeader)
+			case 5:
+				ur := sel3v5
+				r.mainThreadSaturation.working()
+				// Reject any restores since we are not the leader
+				ur.respond(ErrNotLeader)
 
-		case l := <-r.leadershipTransferCh:
-			r.mainThreadSaturation.working()
-			// Reject any operations since we are not the leader
-			l.respond(ErrNotLeader)
+			case 6:
+				l := sel3v6
+				r.mainThreadSaturation.working()
+				// Reject any operations since we are not the leader
+				l.respond(ErrNotLeader)
 
-		case c := <-r.configurationsCh:
-			r.mainThreadSaturation.working()
-			c.configurations = r.configurations.Clone()
-			c.respond(nil)
+			case 7:
+				c := sel3v7
+				r.mainThreadSaturation.working()
+				c.configurations = r.configurations.Clone()
+				c.respond(nil)
 
-		case b := <-r.bootstrapCh:
-			r.mainThreadSaturation.working()
-			b.respond(r.liveBootstrap(b.configuration))
+			case 8:
+				b := sel3v8
+				r.mainThreadSaturation.working()
+				b.respond(r.liveBootstrap(b.configuration))
 
-		case <-r.leaderNotifyCh:
-			//  Ignore since we are not the leader
+			case 9:
+				//  Ignore since we are not the leader
 
-		case <-r.followerNotifyCh:
-			heartbeatTimer = time.After(0)
+			case 10:
+				heartbeatTimer = r.w.After(0)
 
-		case <-heartbeatTimer:
-			r.mainThreadSaturation.working()
-			// Restart the heartbeat timer
-			hbTimeout := r.config().HeartbeatTimeout
-			heartbeatTimer = randomTimeout(hbTimeout)
+			case 11:
+				r.mainThreadSaturation.working()
+				// Restart the heartbeat timer
+				hbTimeout := r.config().HeartbeatTimeout
+				heartbeatTimer = randomTimeout(r.w, hbTimeout)
 
-			// Check if we have had a successful contact
-			lastContact := r.LastContact()
-			if time.Since(lastContact) < hbTimeout {
-				continue
+				// Check if we have had a successful contact
+				lastContact := r.LastContact()
+				if r.w.Since(lastContact) < hbTimeout {
+					continue
+				}
+
+				// Heartbeat failed! Transition to the candidate state
+				lastLeaderAddr, lastLeaderID := r.LeaderWithID()
+				r.setLeader("", "")
+
+				if r.configurations.latestIndex == 0 {
+					if !didWarn {
+						r.logger.Warn("no known peers, aborting election")
+						didWarn = true
+					}
+				} else if r.configurations.latestIndex == r.configurations.committedIndex &&
+					!hasVote(r.configurations.latest, r.localID) {
+					if !didWarn {
+						r.logger.Warn("not part of stable configuration, aborting election")
+						didWarn = true
+					}
+				} else {
+					metrics.IncrCounter([]string{"raft", "transition", "heartbeat_timeout"}, 1)
+					if hasVote(r.configurations.latest, r.localID) {
+						r.logger.Warn("heartbeat timeout reached, starting election", "last-leader-addr", lastLeaderAddr, "last-leader-id", lastLeaderID)
+						r.setState(Candidate)
+						return
+					} else if !didWarn {
+						r.logger.Warn("heartbeat timeout reached, not part of a stable configuration or a non-voter, not triggering a leader election")
+						didWarn = true
+					}
+				}
+
+			case 12:
+				return
+			default:
+				panic("dstmigrate: no select case ran")
 			}
-
-			// Heartbeat failed! Transition to the candidate state
-			lastLeaderAddr, lastLeaderID := r.LeaderWithID()
-			r.setLeader("", "")
-
-			if r.configurations.latestIndex == 0 {
-				if !didWarn {
-					r.logger.Warn("no known peers, aborting election")
-					didWarn = true
-				}
-			} else if r.configurations.latestIndex == r.configurations.committedIndex &&
-				!hasVote(r.configurations.latest, r.localID) {
-				if !didWarn {
-					r.logger.Warn("not part of stable configuration, aborting election")
-					didWarn = true
-				}
-			} else {
-				metrics.IncrCounter([]string{"raft", "transition", "heartbeat_timeout"}, 1)
-				if hasVote(r.configurations.latest, r.localID) {
-					r.logger.Warn("heartbeat timeout reached, starting election", "last-leader-addr", lastLeaderAddr, "last-leader-id", lastLeaderID)
-					r.setState(Candidate)
-					return
-				} else if !didWarn {
-					r.logger.Warn("heartbeat timeout reached, not part of a stable configuration or a non-voter, not triggering a leader election")
-					didWarn = true
-				}
-			}
-
-		case <-r.shutdownCh:
-			return
 		}
 	}
 }
@@ -289,8 +344,8 @@ func (r *Raft) runCandidate() {
 	metrics.IncrCounter([]string{"raft", "state", "candidate"}, 1)
 
 	// Start vote for us, and set a timeout
-	var voteCh <-chan *voteResult
-	var prevoteCh <-chan *preVoteResult
+	var voteCh dst.Chan[*voteResult]
+	var prevoteCh dst.Chan[*preVoteResult]
 
 	// check if pre-vote is active and that this is not a leader transfer.
 	// Leader transfer do not perform prevote by design
@@ -308,7 +363,7 @@ func (r *Raft) runCandidate() {
 	defer func() { r.candidateFromLeadershipTransfer.Store(false) }()
 
 	electionTimeout := r.config().ElectionTimeout
-	electionTimer := randomTimeout(electionTimeout)
+	electionTimer := randomTimeout(r.w, electionTimeout)
 
 	// Tally the votes, need a simple majority
 	preVoteGrantedVotes := 0
@@ -320,122 +375,163 @@ func (r *Raft) runCandidate() {
 	for r.getState() == Candidate {
 		r.mainThreadSaturation.sleeping()
 
-		select {
-		case rpc := <-r.rpcCh:
-			r.mainThreadSaturation.working()
-			r.processRPC(rpc)
-		case preVote := <-prevoteCh:
-			// This a pre-vote case it should trigger a "real" election if the pre-vote is won.
-			r.mainThreadSaturation.working()
-			r.logger.Debug("pre-vote received", "from", preVote.voterID, "term", preVote.Term, "tally", preVoteGrantedVotes)
-			// Check if the term is greater than ours, bail
-			if preVote.Term > term {
-				r.logger.Debug("pre-vote denied: found newer term, falling back to follower", "term", preVote.Term)
-				r.setState(Follower)
-				r.setCurrentTerm(preVote.Term)
+		{
+			var sel4 int
+			var sel4v1 RPC
+			var sel4v2 *preVoteResult
+			var sel4v3 *voteResult
+			var sel4v4 *configurationChangeFuture
+			var sel4v5 *logFuture
+			var sel4v6 *verifyFuture
+			var sel4v7 *userRestoreFuture
+			var sel4v8 *leadershipTransferFuture
+			var sel4v9 *configurationsFuture
+			var sel4v10 *bootstrapFuture
+			dst.Select(r.w,
+				dst.OnRecv(r.rpcCh, func(v RPC, _ bool) { sel4 = 1; sel4v1 = v }),
+				dst.OnRecv(prevoteCh, func(v *preVoteResult, _ bool) { sel4 = 2; sel4v2 = v }),
+				dst.OnRecv(voteCh, func(v *voteResult, _ bool) { sel4 = 3; sel4v3 = v }),
+				dst.OnRecv(r.configurationChangeCh, func(v *configurationChangeFuture, _ bool) { sel4 = 4; sel4v4 = v }),
+				dst.OnRecv(r.applyCh, func(v *logFuture, _ bool) { sel4 = 5; sel4v5 = v }),
+				dst.OnRecv(r.verifyCh, func(v *verifyFuture, _ bool) { sel4 = 6; sel4v6 = v }),
+				dst.OnRecv(r.userRestoreCh, func(v *userRestoreFuture, _ bool) { sel4 = 7; sel4v7 = v }),
+				dst.OnRecv(r.leadershipTransferCh, func(v *leadershipTransferFuture, _ bool) { sel4 = 8; sel4v8 = v }),
+				dst.OnRecv(r.configurationsCh, func(v *configurationsFuture, _ bool) { sel4 = 9; sel4v9 = v }),
+				dst.OnRecv(r.bootstrapCh, func(v *bootstrapFuture, _ bool) { sel4 = 10; sel4v10 = v }),
+				dst.OnRecv(r.leaderNotifyCh, func(_ struct{}, _ bool) { sel4 = 11 }),
+				dst.OnRecv(r.followerNotifyCh, func(_ struct{}, _ bool) { sel4 = 12 }),
+				dst.OnRecv(electionTimer, func(_ time.Time, _ bool) { sel4 = 13 }),
+				dst.OnRecv(r.shutdownCh, func(_ struct{}, _ bool) { sel4 = 14 }),
+			)
+			switch sel4 {
+			case 1:
+				rpc := sel4v1
+				r.mainThreadSaturation.working()
+				r.processRPC(rpc)
+			case 2:
+				preVote := sel4v2
+				// This a pre-vote case it should trigger a "real" election if the pre-vote is won.
+				r.mainThreadSaturation.working()
+				r.logger.Debug("pre-vote received", "from", preVote.voterID, "term", preVote.Term, "tally", preVoteGrantedVotes)
+				// Check if the term is greater than ours, bail
+				if preVote.Term > term {
+					r.logger.Debug("pre-vote denied: found newer term, falling back to follower", "term", preVote.Term)
+					r.setState(Follower)
+					r.setCurrentTerm(preVote.Term)
+					return
+				}
+
+				// Check if the preVote is granted
+				if preVote.Granted {
+					preVoteGrantedVotes++
+					r.logger.Debug("pre-vote granted", "from", preVote.voterID, "term", preVote.Term, "tally", preVoteGrantedVotes)
+				} else {
+					preVoteRefusedVotes++
+					r.logger.Debug("pre-vote denied", "from", preVote.voterID, "term", preVote.Term, "tally", preVoteGrantedVotes)
+				}
+
+				// Check if we've won the pre-vote and proceed to election if so
+				if preVoteGrantedVotes >= votesNeeded {
+					r.logger.Info("pre-vote successful, starting election", "term", preVote.Term,
+						"tally", preVoteGrantedVotes, "refused", preVoteRefusedVotes, "votesNeeded", votesNeeded)
+					preVoteGrantedVotes = 0
+					preVoteRefusedVotes = 0
+					electionTimer = randomTimeout(r.w, electionTimeout)
+					prevoteCh = (dst.Chan[*preVoteResult]{})
+					voteCh = r.electSelf()
+				}
+				// Check if we've lost the pre-vote and wait for the election to timeout so we can do another time of
+				// prevote.
+				if preVoteRefusedVotes >= votesNeeded {
+					r.logger.Info("pre-vote campaign failed, waiting for election timeout", "term", preVote.Term,
+						"tally", preVoteGrantedVotes, "refused", preVoteRefusedVotes, "votesNeeded", votesNeeded)
+				}
+			case 3:
+				vote := sel4v3
+				r.mainThreadSaturation.working()
+				// Check if the term is greater than ours, bail
+				if vote.Term > r.getCurrentTerm() {
+					r.logger.Debug("newer term discovered, fallback to follower", "term", vote.Term)
+					r.setState(Follower)
+					r.setCurrentTerm(vote.Term)
+					return
+				}
+
+				// Check if the vote is granted
+				if vote.Granted {
+					grantedVotes++
+					r.logger.Debug("vote granted", "from", vote.voterID, "term", vote.Term, "tally", grantedVotes)
+				}
+
+				// Check if we've become the leader
+				if grantedVotes >= votesNeeded {
+					r.logger.Info("election won", "term", vote.Term, "tally", grantedVotes)
+					r.setState(Leader)
+					r.setLeader(r.localAddr, r.localID)
+					return
+				}
+			case 4:
+				c := sel4v4
+				r.mainThreadSaturation.working()
+				// Reject any operations since we are not the leader
+				c.respond(ErrNotLeader)
+
+			case 5:
+				a := sel4v5
+				r.mainThreadSaturation.working()
+				// Reject any operations since we are not the leader
+				a.respond(ErrNotLeader)
+
+			case 6:
+				v := sel4v6
+				r.mainThreadSaturation.working()
+				// Reject any operations since we are not the leader
+				v.respond(ErrNotLeader)
+
+			case 7:
+				ur := sel4v7
+				r.mainThreadSaturation.working()
+				// Reject any restores since we are not the leader
+				ur.respond(ErrNotLeader)
+
+			case 8:
+				l := sel4v8
+				r.mainThreadSaturation.working()
+				// Reject any operations since we are not the leader
+				l.respond(ErrNotLeader)
+
+			case 9:
+				c := sel4v9
+				r.mainThreadSaturation.working()
+				c.configurations = r.configurations.Clone()
+				c.respond(nil)
+
+			case 10:
+				b := sel4v10
+				r.mainThreadSaturation.working()
+				b.respond(ErrCantBootstrap)
+
+			case 11:
+				//  Ignore since we are not the leader
+
+			case 12:
+				if electionTimeout != r.config().ElectionTimeout {
+					electionTimeout = r.config().ElectionTimeout
+					electionTimer = randomTimeout(r.w, electionTimeout)
+				}
+
+			case 13:
+				r.mainThreadSaturation.working()
+				// Election failed! Restart the election. We simply return,
+				// which will kick us back into runCandidate
+				r.logger.Warn("Election timeout reached, restarting election")
 				return
-			}
 
-			// Check if the preVote is granted
-			if preVote.Granted {
-				preVoteGrantedVotes++
-				r.logger.Debug("pre-vote granted", "from", preVote.voterID, "term", preVote.Term, "tally", preVoteGrantedVotes)
-			} else {
-				preVoteRefusedVotes++
-				r.logger.Debug("pre-vote denied", "from", preVote.voterID, "term", preVote.Term, "tally", preVoteGrantedVotes)
-			}
-
-			// Check if we've won the pre-vote and proceed to election if so
-			if preVoteGrantedVotes >= votesNeeded {
-				r.logger.Info("pre-vote successful, starting election", "term", preVote.Term,
-					"tally", preVoteGrantedVotes, "refused", preVoteRefusedVotes, "votesNeeded", votesNeeded)
-				preVoteGrantedVotes = 0
-				preVoteRefusedVotes = 0
-				electionTimer = randomTimeout(electionTimeout)
-				prevoteCh = nil
-				voteCh = r.electSelf()
-			}
-			// Check if we've lost the pre-vote and wait for the election to timeout so we can do another time of
-			// prevote.
-			if preVoteRefusedVotes >= votesNeeded {
-				r.logger.Info("pre-vote campaign failed, waiting for election timeout", "term", preVote.Term,
-					"tally", preVoteGrantedVotes, "refused", preVoteRefusedVotes, "votesNeeded", votesNeeded)
-			}
-		case vote := <-voteCh:
-			r.mainThreadSaturation.working()
-			// Check if the term is greater than ours, bail
-			if vote.Term > r.getCurrentTerm() {
-				r.logger.Debug("newer term discovered, fallback to follower", "term", vote.Term)
-				r.setState(Follower)
-				r.setCurrentTerm(vote.Term)
+			case 14:
 				return
+			default:
+				panic("dstmigrate: no select case ran")
 			}
-
-			// Check if the vote is granted
-			if vote.Granted {
-				grantedVotes++
-				r.logger.Debug("vote granted", "from", vote.voterID, "term", vote.Term, "tally", grantedVotes)
-			}
-
-			// Check if we've become the leader
-			if grantedVotes >= votesNeeded {
-				r.logger.Info("election won", "term", vote.Term, "tally", grantedVotes)
-				r.setState(Leader)
-				r.setLeader(r.localAddr, r.localID)
-				return
-			}
-		case c := <-r.configurationChangeCh:
-			r.mainThreadSaturation.working()
-			// Reject any operations since we are not the leader
-			c.respond(ErrNotLeader)
-
-		case a := <-r.applyCh:
-			r.mainThreadSaturation.working()
-			// Reject any operations since we are not the leader
-			a.respond(ErrNotLeader)
-
-		case v := <-r.verifyCh:
-			r.mainThreadSaturation.working()
-			// Reject any operations since we are not the leader
-			v.respond(ErrNotLeader)
-
-		case ur := <-r.userRestoreCh:
-			r.mainThreadSaturation.working()
-			// Reject any restores since we are not the leader
-			ur.respond(ErrNotLeader)
-
-		case l := <-r.leadershipTransferCh:
-			r.mainThreadSaturation.working()
-			// Reject any operations since we are not the leader
-			l.respond(ErrNotLeader)
-
-		case c := <-r.configurationsCh:
-			r.mainThreadSaturation.working()
-			c.configurations = r.configurations.Clone()
-			c.respond(nil)
-
-		case b := <-r.bootstrapCh:
-			r.mainThreadSaturation.working()
-			b.respond(ErrCantBootstrap)
-
-		case <-r.leaderNotifyCh:
-			//  Ignore since we are not the leader
-
-		case <-r.followerNotifyCh:
-			if electionTimeout != r.config().ElectionTimeout {
-				electionTimeout = r.config().ElectionTimeout
-				electionTimer = randomTimeout(electionTimeout)
-			}
-
-		case <-electionTimer:
-			r.mainThreadSaturation.working()
-			// Election failed! Restart the election. We simply return,
-			// which will kick us back into runCandidate
-			r.logger.Warn("Election timeout reached, restarting election")
-			return
-
-		case <-r.shutdownCh:
-			return
 		}
 	}
 }
@@ -454,14 +550,14 @@ func (r *Raft) getLeadershipTransferInProgress() bool {
 }
 
 func (r *Raft) setupLeaderState() {
-	r.leaderState.commitCh = make(chan struct{}, 1)
+	r.leaderState.commitCh = dst.MakeChan[struct{}](r.w, 1)
 	r.leaderState.commitment = newCommitment(r.leaderState.commitCh,
 		r.configurations.latest,
 		r.getLastIndex()+1 /* first index that may be committed in this term */)
 	r.leaderState.inflight = list.New()
 	r.leaderState.replState = make(map[ServerID]*followerReplication)
 	r.leaderState.notify = make(map[*verifyFuture]struct{})
-	r.leaderState.stepDown = make(chan struct{}, 1)
+	r.leaderState.stepDown = dst.MakeChan[struct{}](r.w, 1)
 }
 
 // runLeader runs the main loop while in leader state. Do the setup here and drop into
@@ -479,14 +575,32 @@ func (r *Raft) runLeader() {
 	notify := r.config().NotifyCh
 
 	// Push to the notify channel if given
-	if notify != nil {
-		select {
-		case notify <- true:
-		case <-r.shutdownCh:
-			// make sure push to the notify channel ( if given )
-			select {
-			case notify <- true:
+	if notify != (dst.Chan[bool]{}) {
+		{
+			var sel5 int
+			dst.Select(r.w,
+				dst.OnSend(notify, true, func() { sel5 = 1 }),
+				dst.OnRecv(r.shutdownCh, func(_ struct{}, _ bool) { sel5 = 2 }),
+			)
+			switch sel5 {
+			case 1:
+			case 2:
+				// make sure push to the notify channel ( if given )
+				{
+					var sel6 int
+					dst.Select(r.w,
+						dst.OnSend(notify, true, func() { sel6 = 1 }),
+						dst.Default(func() { sel6 = 2 }),
+					)
+					switch sel6 {
+					case 1:
+					case 2:
+					default:
+						panic("dstmigrate: no select case ran")
+					}
+				}
 			default:
+				panic("dstmigrate: no select case ran")
 			}
 		}
 	}
@@ -496,12 +610,16 @@ func (r *Raft) runLeader() {
 	r.setupLeaderState()
 
 	// Run a background go-routine to emit metrics on log age
-	stopCh := make(chan struct{})
-	go emitLogStoreMetrics(r.logs, []string{"raft", "leader"}, oldestLogGaugeInterval, stopCh)
+	stopCh := dst.MakeChan[struct{}](r.w, 0)
+	{
+		goArg2 := r.logs
+		goArg3 := []string{"raft", "leader"}
+		r.w.Go(func() { emitLogStoreMetrics(r.w, goArg2, goArg3, oldestLogGaugeInterval, stopCh) })
+	}
 
 	// Cleanup state on step down
 	defer func() {
-		close(stopCh)
+		stopCh.Close()
 
 		// Since we were the leader previously, we update our
 		// last contact time when we step down, so that we are not
@@ -512,7 +630,7 @@ func (r *Raft) runLeader() {
 
 		// Stop replication
 		for _, p := range r.leaderState.replState {
-			close(p.stopCh)
+			p.stopCh.Close()
 		}
 
 		// Respond to all inflight operations
@@ -526,12 +644,12 @@ func (r *Raft) runLeader() {
 		}
 
 		// Clear all the state
-		r.leaderState.commitCh = nil
+		r.leaderState.commitCh = (dst.Chan[struct{}]{})
 		r.leaderState.commitment = nil
 		r.leaderState.inflight = nil
 		r.leaderState.replState = nil
 		r.leaderState.notify = nil
-		r.leaderState.stepDown = nil
+		r.leaderState.stepDown = (dst.Chan[struct{}]{})
 
 		// If we are stepping down for some reason, no known leader.
 		// We may have stepped down due to an RPC call, which would
@@ -547,14 +665,32 @@ func (r *Raft) runLeader() {
 		overrideNotifyBool(r.leaderCh, false)
 
 		// Push to the notify channel if given
-		if notify != nil {
-			select {
-			case notify <- false:
-			case <-r.shutdownCh:
-				// On shutdown, make a best effort but do not block
-				select {
-				case notify <- false:
+		if notify != (dst.Chan[bool]{}) {
+			{
+				var sel7 int
+				dst.Select(r.w,
+					dst.OnSend(notify, false, func() { sel7 = 1 }),
+					dst.OnRecv(r.shutdownCh, func(_ struct{}, _ bool) { sel7 = 2 }),
+				)
+				switch sel7 {
+				case 1:
+				case 2:
+					// On shutdown, make a best effort but do not block
+					{
+						var sel8 int
+						dst.Select(r.w,
+							dst.OnSend(notify, false, func() { sel8 = 1 }),
+							dst.Default(func() { sel8 = 2 }),
+						)
+						switch sel8 {
+						case 1:
+						case 2:
+						default:
+							panic("dstmigrate: no select case ran")
+						}
+					}
 				default:
+					panic("dstmigrate: no select case ran")
 				}
 			}
 		}
@@ -596,16 +732,17 @@ func (r *Raft) startStopReplication() {
 		if !ok {
 			r.logger.Info("added peer, starting replication", "peer", server.ID)
 			s = &followerReplication{
+				w:                   r.w,
 				peer:                server,
 				commitment:          r.leaderState.commitment,
-				stopCh:              make(chan uint64, 1),
-				triggerCh:           make(chan struct{}, 1),
-				triggerDeferErrorCh: make(chan *deferError, 1),
+				stopCh:              dst.MakeChan[uint64](r.w, 1),
+				triggerCh:           dst.MakeChan[struct{}](r.w, 1),
+				triggerDeferErrorCh: dst.MakeChan[*deferError](r.w, 1),
 				currentTerm:         r.getCurrentTerm(),
 				nextIndex:           lastIdx + 1,
-				lastContact:         time.Now(),
+				lastContact:         r.w.Now(),
 				notify:              make(map[*verifyFuture]struct{}),
-				notifyCh:            make(chan struct{}, 1),
+				notifyCh:            dst.MakeChan[struct{}](r.w, 1),
 				stepDown:            r.leaderState.stepDown,
 			}
 
@@ -635,8 +772,8 @@ func (r *Raft) startStopReplication() {
 		}
 		// Replicate up to lastIdx and stop
 		r.logger.Info("removed peer, stopping replication", "peer", serverID, "last-index", lastIdx)
-		repl.stopCh <- lastIdx
-		close(repl.stopCh)
+		repl.stopCh.Send(lastIdx)
+		repl.stopCh.Close()
 		delete(r.leaderState.replState, serverID)
 		r.observe(PeerObservation{Peer: repl.peer, Removed: true})
 	}
@@ -651,7 +788,7 @@ func (r *Raft) startStopReplication() {
 //
 // Note that if the conditions here were to change outside of leaderLoop to take
 // this from nil to non-nil, we would need leaderLoop to be kicked.
-func (r *Raft) configurationChangeChIfStable() chan *configurationChangeFuture {
+func (r *Raft) configurationChangeChIfStable() dst.Chan[*configurationChangeFuture] {
 	// Have to wait until:
 	// 1. The latest configuration is committed, and
 	// 2. This leader has committed some entry (the noop) in this term
@@ -660,7 +797,7 @@ func (r *Raft) configurationChangeChIfStable() chan *configurationChangeFuture {
 		r.getCommitIndex() >= r.leaderState.commitment.startIndex {
 		return r.configurationChangeCh
 	}
-	return nil
+	return (dst.Chan[*configurationChangeFuture]{})
 }
 
 // leaderLoop is the hot loop for a leader. It is invoked
@@ -675,288 +812,361 @@ func (r *Raft) leaderLoop() {
 	stepDown := false
 	// This is only used for the first lease check, we reload lease below
 	// based on the current config value.
-	lease := time.After(r.config().LeaderLeaseTimeout)
+	lease := r.w.After(r.config().LeaderLeaseTimeout)
 
 	for r.getState() == Leader {
 		r.mainThreadSaturation.sleeping()
 
-		select {
-		case rpc := <-r.rpcCh:
-			r.mainThreadSaturation.working()
-			r.processRPC(rpc)
+		{
+			var sel9 int
+			var sel9v1 RPC
+			var sel9v3 *leadershipTransferFuture
+			var sel9v5 *verifyFuture
+			var sel9v6 *userRestoreFuture
+			var sel9v7 *configurationsFuture
+			var sel9v8 *configurationChangeFuture
+			var sel9v9 *bootstrapFuture
+			var sel9v10 *logFuture
+			dst.Select(r.w,
+				dst.OnRecv(r.rpcCh, func(v RPC, _ bool) { sel9 = 1; sel9v1 = v }),
+				dst.OnRecv(r.leaderState.stepDown, func(_ struct{}, _ bool) { sel9 = 2 }),
+				dst.OnRecv(r.leadershipTransferCh, func(v *leadershipTransferFuture, _ bool) { sel9 = 3; sel9v3 = v }),
+				dst.OnRecv(r.leaderState.commitCh, func(_ struct{}, _ bool) { sel9 = 4 }),
+				dst.OnRecv(r.verifyCh, func(v *verifyFuture, _ bool) { sel9 = 5; sel9v5 = v }),
+				dst.OnRecv(r.userRestoreCh, func(v *userRestoreFuture, _ bool) { sel9 = 6; sel9v6 = v }),
+				dst.OnRecv(r.configurationsCh, func(v *configurationsFuture, _ bool) { sel9 = 7; sel9v7 = v }),
+				dst.OnRecv(r.configurationChangeChIfStable(), func(v *configurationChangeFuture, _ bool) { sel9 = 8; sel9v8 = v }),
+				dst.OnRecv(r.bootstrapCh, func(v *bootstrapFuture, _ bool) { sel9 = 9; sel9v9 = v }),
+				dst.OnRecv(r.applyCh, func(v *logFuture, _ bool) { sel9 = 10; sel9v10 = v }),
+				dst.OnRecv(lease, func(_ time.Time, _ bool) { sel9 = 11 }),
+				dst.OnRecv(r.leaderNotifyCh, func(_ struct{}, _ bool) { sel9 = 12 }),
+				dst.OnRecv(r.followerNotifyCh, func(_ struct{}, _ bool) { sel9 = 13 }),
+				dst.OnRecv(r.shutdownCh, func(_ struct{}, _ bool) { sel9 = 14 }),
+			)
+			switch sel9 {
+			case 1:
+				rpc := sel9v1
+				r.mainThreadSaturation.working()
+				r.processRPC(rpc)
 
-		case <-r.leaderState.stepDown:
-			r.mainThreadSaturation.working()
-			r.setState(Follower)
+			case 2:
+				r.mainThreadSaturation.working()
+				r.setState(Follower)
 
-		case future := <-r.leadershipTransferCh:
-			r.mainThreadSaturation.working()
-			if r.getLeadershipTransferInProgress() {
-				r.logger.Debug(ErrLeadershipTransferInProgress.Error())
-				future.respond(ErrLeadershipTransferInProgress)
-				continue
-			}
+			case 3:
+				future := sel9v3
+				r.mainThreadSaturation.working()
+				if r.getLeadershipTransferInProgress() {
+					r.logger.Debug(ErrLeadershipTransferInProgress.Error())
+					future.respond(ErrLeadershipTransferInProgress)
+					continue
+				}
 
-			r.logger.Debug("starting leadership transfer", "id", future.ID, "address", future.Address)
+				r.logger.Debug("starting leadership transfer", "id", future.ID, "address", future.Address)
 
-			// When we are leaving leaderLoop, we are no longer
-			// leader, so we should stop transferring.
-			leftLeaderLoop := make(chan struct{})
-			defer func() { close(leftLeaderLoop) }()
+				// When we are leaving leaderLoop, we are no longer
+				// leader, so we should stop transferring.
+				leftLeaderLoop := dst.MakeChan[struct{}](r.w, 0)
+				defer func() { leftLeaderLoop.Close() }()
 
-			stopCh := make(chan struct{})
-			doneCh := make(chan error, 1)
+				stopCh := dst.MakeChan[struct{}](r.w, 0)
+				doneCh := dst.MakeChan[error](r.w, 1)
 
-			// This is intentionally being setup outside of the
-			// leadershipTransfer function. Because the TimeoutNow
-			// call is blocking and there is no way to abort that
-			// in case eg the timer expires.
-			// The leadershipTransfer function is controlled with
-			// the stopCh and doneCh.
-			// No matter how this exits, have this function set
-			// leadership transfer to false before we return
-			//
-			// Note that this leaves a window where callers of
-			// LeadershipTransfer() and LeadershipTransferToServer()
-			// may start executing after they get their future but before
-			// this routine has set leadershipTransferInProgress back to false.
-			// It may be safe to modify things such that setLeadershipTransferInProgress
-			// is set to false before calling future.Respond, but that still needs
-			// to be tested and this situation mirrors what callers already had to deal with.
-			go func() {
-				defer r.setLeadershipTransferInProgress(false)
-				select {
-				case <-time.After(r.config().ElectionTimeout):
-					close(stopCh)
-					err := fmt.Errorf("leadership transfer timeout")
-					r.logger.Debug(err.Error())
-					future.respond(err)
-					<-doneCh
-				case <-leftLeaderLoop:
-					close(stopCh)
-					err := fmt.Errorf("lost leadership during transfer (expected)")
-					r.logger.Debug(err.Error())
-					future.respond(nil)
-					<-doneCh
-				case err := <-doneCh:
-					if err != nil {
-						r.logger.Debug(err.Error())
-						future.respond(err)
-					} else {
-						// Wait for up to ElectionTimeout before flagging the
-						// leadership transfer as done and unblocking applies in
-						// the leaderLoop.
-						select {
-						case <-time.After(r.config().ElectionTimeout):
+				// This is intentionally being setup outside of the
+				// leadershipTransfer function. Because the TimeoutNow
+				// call is blocking and there is no way to abort that
+				// in case eg the timer expires.
+				// The leadershipTransfer function is controlled with
+				// the stopCh and doneCh.
+				// No matter how this exits, have this function set
+				// leadership transfer to false before we return
+				//
+				// Note that this leaves a window where callers of
+				// LeadershipTransfer() and LeadershipTransferToServer()
+				// may start executing after they get their future but before
+				// this routine has set leadershipTransferInProgress back to false.
+				// It may be safe to modify things such that setLeadershipTransferInProgress
+				// is set to false before calling future.Respond, but that still needs
+				// to be tested and this situation mirrors what callers already had to deal with.
+				r.w.Go(func() {
+					defer r.setLeadershipTransferInProgress(false)
+					{
+						var sel10 int
+						var sel10v3 error
+						dst.Select(r.w,
+							dst.OnRecv(r.w.After(r.config().ElectionTimeout), func(_ time.Time, _ bool) { sel10 = 1 }),
+							dst.OnRecv(leftLeaderLoop, func(_ struct{}, _ bool) { sel10 = 2 }),
+							dst.OnRecv(doneCh, func(v error, _ bool) { sel10 = 3; sel10v3 = v }),
+						)
+						switch sel10 {
+						case 1:
+							stopCh.Close()
 							err := fmt.Errorf("leadership transfer timeout")
 							r.logger.Debug(err.Error())
 							future.respond(err)
-						case <-leftLeaderLoop:
-							r.logger.Debug("lost leadership during transfer (expected)")
+							doneCh.Recv()
+						case 2:
+							stopCh.Close()
+							err := fmt.Errorf("lost leadership during transfer (expected)")
+							r.logger.Debug(err.Error())
 							future.respond(nil)
+							doneCh.Recv()
+						case 3:
+							err := sel10v3
+							if err != nil {
+								r.logger.Debug(err.Error())
+								future.respond(err)
+							} else {
+								// Wait for up to ElectionTimeout before flagging the
+								// leadership transfer as done and unblocking applies in
+								// the leaderLoop.
+								{
+									var sel11 int
+									dst.Select(r.w,
+										dst.OnRecv(r.w.After(r.config().ElectionTimeout), func(_ time.Time, _ bool) { sel11 = 1 }),
+										dst.OnRecv(leftLeaderLoop, func(_ struct{}, _ bool) { sel11 = 2 }),
+									)
+									switch sel11 {
+									case 1:
+										err := fmt.Errorf("leadership transfer timeout")
+										r.logger.Debug(err.Error())
+										future.respond(err)
+									case 2:
+										r.logger.Debug("lost leadership during transfer (expected)")
+										future.respond(nil)
+									default:
+										panic("dstmigrate: no select case ran")
+									}
+								}
+							}
+						default:
+							panic("dstmigrate: no select case ran")
+						}
+					}
+				})
+
+				// leaderState.replState is accessed here before
+				// starting leadership transfer asynchronously because
+				// leaderState is only supposed to be accessed in the
+				// leaderloop.
+				id := future.ID
+				address := future.Address
+				if id == nil {
+					s := r.pickServer()
+					if s != nil {
+						id = &s.ID
+						address = &s.Address
+					} else {
+						doneCh.Send(fmt.Errorf("cannot find peer"))
+						continue
+					}
+				}
+				state, ok := r.leaderState.replState[*id]
+				if !ok {
+					doneCh.Send(fmt.Errorf("cannot find replication state for %v", id))
+					continue
+				}
+				r.setLeadershipTransferInProgress(true)
+				{
+					goArg4 := *id
+					goArg5 := *address
+					r.w.Go(func() { r.leadershipTransfer(goArg4, goArg5, state, stopCh, doneCh) })
+				}
+
+			case 4:
+				r.mainThreadSaturation.working()
+				// Process the newly committed entries
+				oldCommitIndex := r.getCommitIndex()
+				commitIndex := r.leaderState.commitment.getCommitIndex()
+				r.setCommitIndex(commitIndex)
+
+				// New configuration has been committed, set it as the committed
+				// value.
+				if r.configurations.latestIndex > oldCommitIndex &&
+					r.configurations.latestIndex <= commitIndex {
+					r.setCommittedConfiguration(r.configurations.latest, r.configurations.latestIndex)
+					if !hasVote(r.configurations.committed, r.localID) {
+						stepDown = true
+					}
+				}
+
+				start := r.w.Now()
+				var groupReady []*list.Element
+				groupFutures := make(map[uint64]*logFuture)
+				var lastIdxInGroup uint64
+
+				// Pull all inflight logs that are committed off the queue.
+				for e := r.leaderState.inflight.Front(); e != nil; e = e.Next() {
+					commitLog := e.Value.(*logFuture)
+					idx := commitLog.log.Index
+					if idx > commitIndex {
+						// Don't go past the committed index
+						break
+					}
+
+					// Measure the commit time
+					metrics.MeasureSince([]string{"raft", "commitTime"}, commitLog.dispatch)
+					groupReady = append(groupReady, e)
+					groupFutures[idx] = commitLog
+					lastIdxInGroup = idx
+				}
+
+				// Process the group
+				if len(groupReady) != 0 {
+					r.processLogs(lastIdxInGroup, groupFutures)
+
+					for _, e := range groupReady {
+						r.leaderState.inflight.Remove(e)
+					}
+				}
+
+				// Measure the time to enqueue batch of logs for FSM to apply
+				metrics.MeasureSince([]string{"raft", "fsm", "enqueue"}, start)
+
+				// Count the number of logs enqueued
+				metrics.SetGauge([]string{"raft", "commitNumLogs"}, float32(len(groupReady)))
+
+				if stepDown {
+					if r.config().ShutdownOnRemove {
+						r.logger.Info("removed ourself, shutting down")
+						r.Shutdown()
+					} else {
+						r.logger.Info("removed ourself, transitioning to follower")
+						r.setState(Follower)
+					}
+				}
+
+			case 5:
+				v := sel9v5
+				r.mainThreadSaturation.working()
+				if v.quorumSize == 0 {
+					// Just dispatched, start the verification
+					r.verifyLeader(v)
+				} else if v.votes < v.quorumSize {
+					// Early return, means there must be a new leader
+					r.logger.Warn("new leader elected, stepping down")
+					r.setState(Follower)
+					delete(r.leaderState.notify, v)
+					for _, repl := range r.leaderState.replState {
+						repl.cleanNotify(v)
+					}
+					v.respond(ErrNotLeader)
+
+				} else {
+					// Quorum of members agree, we are still leader
+					delete(r.leaderState.notify, v)
+					for _, repl := range r.leaderState.replState {
+						repl.cleanNotify(v)
+					}
+					v.respond(nil)
+				}
+
+			case 6:
+				future := sel9v6
+				r.mainThreadSaturation.working()
+				if r.getLeadershipTransferInProgress() {
+					r.logger.Debug(ErrLeadershipTransferInProgress.Error())
+					future.respond(ErrLeadershipTransferInProgress)
+					continue
+				}
+				err := r.restoreUserSnapshot(future.meta, future.reader)
+				future.respond(err)
+
+			case 7:
+				future := sel9v7
+				r.mainThreadSaturation.working()
+				if r.getLeadershipTransferInProgress() {
+					r.logger.Debug(ErrLeadershipTransferInProgress.Error())
+					future.respond(ErrLeadershipTransferInProgress)
+					continue
+				}
+				future.configurations = r.configurations.Clone()
+				future.respond(nil)
+
+			case 8:
+				future := sel9v8
+				r.mainThreadSaturation.working()
+				if r.getLeadershipTransferInProgress() {
+					r.logger.Debug(ErrLeadershipTransferInProgress.Error())
+					future.respond(ErrLeadershipTransferInProgress)
+					continue
+				}
+				r.appendConfigurationEntry(future)
+
+			case 9:
+				b := sel9v9
+				r.mainThreadSaturation.working()
+				b.respond(ErrCantBootstrap)
+
+			case 10:
+				newLog := sel9v10
+				r.mainThreadSaturation.working()
+				if r.getLeadershipTransferInProgress() {
+					r.logger.Debug(ErrLeadershipTransferInProgress.Error())
+					newLog.respond(ErrLeadershipTransferInProgress)
+					continue
+				}
+				// Group commit, gather all the ready commits
+				ready := []*logFuture{newLog}
+			GROUP_COMMIT_LOOP:
+				for i := 0; i < r.config().MaxAppendEntries; i++ {
+					{
+						var sel12 int
+						var sel12v1 *logFuture
+						dst.Select(r.w,
+							dst.OnRecv(r.applyCh, func(v *logFuture, _ bool) { sel12 = 1; sel12v1 = v }),
+							dst.Default(func() { sel12 = 2 }),
+						)
+						switch sel12 {
+						case 1:
+							newLog := sel12v1
+							ready = append(ready, newLog)
+						case 2:
+							break GROUP_COMMIT_LOOP
+						default:
+							panic("dstmigrate: no select case ran")
 						}
 					}
 				}
-			}()
 
-			// leaderState.replState is accessed here before
-			// starting leadership transfer asynchronously because
-			// leaderState is only supposed to be accessed in the
-			// leaderloop.
-			id := future.ID
-			address := future.Address
-			if id == nil {
-				s := r.pickServer()
-				if s != nil {
-					id = &s.ID
-					address = &s.Address
+				// Dispatch the logs
+				if stepDown {
+					// we're in the process of stepping down as leader, don't process anything new
+					for i := range ready {
+						ready[i].respond(ErrNotLeader)
+					}
 				} else {
-					doneCh <- fmt.Errorf("cannot find peer")
-					continue
-				}
-			}
-			state, ok := r.leaderState.replState[*id]
-			if !ok {
-				doneCh <- fmt.Errorf("cannot find replication state for %v", id)
-				continue
-			}
-			r.setLeadershipTransferInProgress(true)
-			go r.leadershipTransfer(*id, *address, state, stopCh, doneCh)
-
-		case <-r.leaderState.commitCh:
-			r.mainThreadSaturation.working()
-			// Process the newly committed entries
-			oldCommitIndex := r.getCommitIndex()
-			commitIndex := r.leaderState.commitment.getCommitIndex()
-			r.setCommitIndex(commitIndex)
-
-			// New configuration has been committed, set it as the committed
-			// value.
-			if r.configurations.latestIndex > oldCommitIndex &&
-				r.configurations.latestIndex <= commitIndex {
-				r.setCommittedConfiguration(r.configurations.latest, r.configurations.latestIndex)
-				if !hasVote(r.configurations.committed, r.localID) {
-					stepDown = true
-				}
-			}
-
-			start := time.Now()
-			var groupReady []*list.Element
-			groupFutures := make(map[uint64]*logFuture)
-			var lastIdxInGroup uint64
-
-			// Pull all inflight logs that are committed off the queue.
-			for e := r.leaderState.inflight.Front(); e != nil; e = e.Next() {
-				commitLog := e.Value.(*logFuture)
-				idx := commitLog.log.Index
-				if idx > commitIndex {
-					// Don't go past the committed index
-					break
+					r.dispatchLogs(ready)
 				}
 
-				// Measure the commit time
-				metrics.MeasureSince([]string{"raft", "commitTime"}, commitLog.dispatch)
-				groupReady = append(groupReady, e)
-				groupFutures[idx] = commitLog
-				lastIdxInGroup = idx
-			}
+			case 11:
+				r.mainThreadSaturation.working()
+				// Check if we've exceeded the lease, potentially stepping down
+				maxDiff := r.checkLeaderLease()
 
-			// Process the group
-			if len(groupReady) != 0 {
-				r.processLogs(lastIdxInGroup, groupFutures)
-
-				for _, e := range groupReady {
-					r.leaderState.inflight.Remove(e)
+				// Next check interval should adjust for the last node we've
+				// contacted, without going negative
+				checkInterval := r.config().LeaderLeaseTimeout - maxDiff
+				if checkInterval < minCheckInterval {
+					checkInterval = minCheckInterval
 				}
-			}
 
-			// Measure the time to enqueue batch of logs for FSM to apply
-			metrics.MeasureSince([]string{"raft", "fsm", "enqueue"}, start)
+				// Renew the lease timer
+				lease = r.w.After(checkInterval)
 
-			// Count the number of logs enqueued
-			metrics.SetGauge([]string{"raft", "commitNumLogs"}, float32(len(groupReady)))
-
-			if stepDown {
-				if r.config().ShutdownOnRemove {
-					r.logger.Info("removed ourself, shutting down")
-					r.Shutdown()
-				} else {
-					r.logger.Info("removed ourself, transitioning to follower")
-					r.setState(Follower)
-				}
-			}
-
-		case v := <-r.verifyCh:
-			r.mainThreadSaturation.working()
-			if v.quorumSize == 0 {
-				// Just dispatched, start the verification
-				r.verifyLeader(v)
-			} else if v.votes < v.quorumSize {
-				// Early return, means there must be a new leader
-				r.logger.Warn("new leader elected, stepping down")
-				r.setState(Follower)
-				delete(r.leaderState.notify, v)
+			case 12:
 				for _, repl := range r.leaderState.replState {
-					repl.cleanNotify(v)
+					asyncNotifyCh(repl.notifyCh)
 				}
-				v.respond(ErrNotLeader)
 
-			} else {
-				// Quorum of members agree, we are still leader
-				delete(r.leaderState.notify, v)
-				for _, repl := range r.leaderState.replState {
-					repl.cleanNotify(v)
-				}
-				v.respond(nil)
+			case 13:
+				//  Ignore since we are not a follower
+
+			case 14:
+				return
+			default:
+				panic("dstmigrate: no select case ran")
 			}
-
-		case future := <-r.userRestoreCh:
-			r.mainThreadSaturation.working()
-			if r.getLeadershipTransferInProgress() {
-				r.logger.Debug(ErrLeadershipTransferInProgress.Error())
-				future.respond(ErrLeadershipTransferInProgress)
-				continue
-			}
-			err := r.restoreUserSnapshot(future.meta, future.reader)
-			future.respond(err)
-
-		case future := <-r.configurationsCh:
-			r.mainThreadSaturation.working()
-			if r.getLeadershipTransferInProgress() {
-				r.logger.Debug(ErrLeadershipTransferInProgress.Error())
-				future.respond(ErrLeadershipTransferInProgress)
-				continue
-			}
-			future.configurations = r.configurations.Clone()
-			future.respond(nil)
-
-		case future := <-r.configurationChangeChIfStable():
-			r.mainThreadSaturation.working()
-			if r.getLeadershipTransferInProgress() {
-				r.logger.Debug(ErrLeadershipTransferInProgress.Error())
-				future.respond(ErrLeadershipTransferInProgress)
-				continue
-			}
-			r.appendConfigurationEntry(future)
-
-		case b := <-r.bootstrapCh:
-			r.mainThreadSaturation.working()
-			b.respond(ErrCantBootstrap)
-
-		case newLog := <-r.applyCh:
-			r.mainThreadSaturation.working()
-			if r.getLeadershipTransferInProgress() {
-				r.logger.Debug(ErrLeadershipTransferInProgress.Error())
-				newLog.respond(ErrLeadershipTransferInProgress)
-				continue
-			}
-			// Group commit, gather all the ready commits
-			ready := []*logFuture{newLog}
-		GROUP_COMMIT_LOOP:
-			for i := 0; i < r.config().MaxAppendEntries; i++ {
-				select {
-				case newLog := <-r.applyCh:
-					ready = append(ready, newLog)
-				default:
-					break GROUP_COMMIT_LOOP
-				}
-			}
-
-			// Dispatch the logs
-			if stepDown {
-				// we're in the process of stepping down as leader, don't process anything new
-				for i := range ready {
-					ready[i].respond(ErrNotLeader)
-				}
-			} else {
-				r.dispatchLogs(ready)
-			}
-
-		case <-lease:
-			r.mainThreadSaturation.working()
-			// Check if we've exceeded the lease, potentially stepping down
-			maxDiff := r.checkLeaderLease()
-
-			// Next check interval should adjust for the last node we've
-			// contacted, without going negative
-			checkInterval := r.config().LeaderLeaseTimeout - maxDiff
-			if checkInterval < minCheckInterval {
-				checkInterval = minCheckInterval
-			}
-
-			// Renew the lease timer
-			lease = time.After(checkInterval)
-
-		case <-r.leaderNotifyCh:
-			for _, repl := range r.leaderState.replState {
-				asyncNotifyCh(repl.notifyCh)
-			}
-
-		case <-r.followerNotifyCh:
-			//  Ignore since we are not a follower
-
-		case <-r.shutdownCh:
-			return
 		}
 	}
 }
@@ -988,28 +1198,48 @@ func (r *Raft) verifyLeader(v *verifyFuture) {
 }
 
 // leadershipTransfer is doing the heavy lifting for the leadership transfer.
-func (r *Raft) leadershipTransfer(id ServerID, address ServerAddress, repl *followerReplication, stopCh chan struct{}, doneCh chan error) {
+func (r *Raft) leadershipTransfer(id ServerID, address ServerAddress, repl *followerReplication, stopCh dst.Chan[struct{}], doneCh dst.Chan[error]) {
 	// make sure we are not already stopped
-	select {
-	case <-stopCh:
-		doneCh <- nil
-		return
-	default:
+	{
+		var sel13 int
+		dst.Select(r.w,
+			dst.OnRecv(stopCh, func(_ struct{}, _ bool) { sel13 = 1 }),
+			dst.Default(func() { sel13 = 2 }),
+		)
+		switch sel13 {
+		case 1:
+			doneCh.Send(nil)
+			return
+		case 2:
+		default:
+			panic("dstmigrate: no select case ran")
+		}
 	}
 
 	for atomic.LoadUint64(&repl.nextIndex) <= r.getLastIndex() {
 		err := &deferError{}
 		err.init(r.w)
-		repl.triggerDeferErrorCh <- err
-		select {
-		case err := <-err.errCh:
-			if err != nil {
-				doneCh <- err
+		repl.triggerDeferErrorCh.Send(err)
+		{
+			var sel14 int
+			var sel14v1 error
+			dst.Select(r.w,
+				dst.OnRecv(err.errCh, func(v error, _ bool) { sel14 = 1; sel14v1 = v }),
+				dst.OnRecv(stopCh, func(_ struct{}, _ bool) { sel14 = 2 }),
+			)
+			switch sel14 {
+			case 1:
+				err := sel14v1
+				if err != nil {
+					doneCh.Send(err)
+					return
+				}
+			case 2:
+				doneCh.Send(nil)
 				return
+			default:
+				panic("dstmigrate: no select case ran")
 			}
-		case <-stopCh:
-			doneCh <- nil
-			return
 		}
 	}
 
@@ -1027,7 +1257,7 @@ func (r *Raft) leadershipTransfer(id ServerID, address ServerAddress, repl *foll
 	if err != nil {
 		err = fmt.Errorf("failed to make TimeoutNow RPC to %v: %v", id, err)
 	}
-	doneCh <- err
+	doneCh.Send(err)
 }
 
 // checkLeaderLease is used to check if we can contact a quorum of nodes
@@ -1045,7 +1275,7 @@ func (r *Raft) checkLeaderLease() time.Duration {
 
 	// Check each follower
 	var maxDiff time.Duration
-	now := time.Now()
+	now := r.w.Now()
 	for _, server := range r.configurations.latest.Servers {
 		if server.Suffrage == Voter {
 			if server.ID == r.localID {
@@ -1103,7 +1333,7 @@ func (r *Raft) quorumSize() int {
 // This can only be run on the leader, and returns a future that can be used to
 // block until complete.
 func (r *Raft) restoreUserSnapshot(meta *SnapshotMeta, reader io.Reader) error {
-	defer metrics.MeasureSince([]string{"raft", "restoreUserSnapshot"}, time.Now())
+	defer metrics.MeasureSince([]string{"raft", "restoreUserSnapshot"}, r.w.Now())
 
 	// Sanity check the version.
 	version := meta.Version
@@ -1169,10 +1399,19 @@ func (r *Raft) restoreUserSnapshot(meta *SnapshotMeta, reader io.Reader) error {
 	fsm := &restoreFuture{ID: sink.ID()}
 	fsm.ShutdownCh = r.shutdownCh
 	fsm.init(r.w)
-	select {
-	case r.fsmMutateCh <- fsm:
-	case <-r.shutdownCh:
-		return ErrRaftShutdown
+	{
+		var sel15 int
+		dst.Select(r.w,
+			dst.OnSend[interface{}](r.fsmMutateCh, fsm, func() { sel15 = 1 }),
+			dst.OnRecv(r.shutdownCh, func(_ struct{}, _ bool) { sel15 = 2 }),
+		)
+		switch sel15 {
+		case 1:
+		case 2:
+			return ErrRaftShutdown
+		default:
+			panic("dstmigrate: no select case ran")
+		}
 	}
 	if err := fsm.Error(); err != nil {
 		panic(fmt.Errorf("failed to restore snapshot: %v", err))
@@ -1243,7 +1482,7 @@ func (r *Raft) appendConfigurationEntry(future *configurationChangeFuture) {
 // dispatchLog is called on the leader to push a log to disk, mark it
 // as inflight and begin replication of it.
 func (r *Raft) dispatchLogs(applyLogs []*logFuture) {
-	now := time.Now()
+	now := r.w.Now()
 	defer metrics.MeasureSince([]string{"raft", "leader", "dispatchLog"}, now)
 
 	term := r.getCurrentTerm()
@@ -1302,13 +1541,22 @@ func (r *Raft) processLogs(index uint64, futures map[uint64]*logFuture) {
 	}
 
 	applyBatch := func(batch []*commitTuple) {
-		select {
-		case r.fsmMutateCh <- batch:
-		case <-r.shutdownCh:
-			for _, cl := range batch {
-				if cl.future != nil {
-					cl.future.respond(ErrRaftShutdown)
+		{
+			var sel16 int
+			dst.Select(r.w,
+				dst.OnSend[interface{}](r.fsmMutateCh, batch, func() { sel16 = 1 }),
+				dst.OnRecv(r.shutdownCh, func(_ struct{}, _ bool) { sel16 = 2 }),
+			)
+			switch sel16 {
+			case 1:
+			case 2:
+				for _, cl := range batch {
+					if cl.future != nil {
+						cl.future.respond(ErrRaftShutdown)
+					}
 				}
+			default:
+				panic("dstmigrate: no select case ran")
 			}
 		}
 	}
@@ -1434,13 +1682,22 @@ func (r *Raft) processRPC(rpc RPC) {
 // so that they can be fast-pathed if a transport supports it. This must only
 // be called from the main thread.
 func (r *Raft) processHeartbeat(rpc RPC) {
-	defer metrics.MeasureSince([]string{"raft", "rpc", "processHeartbeat"}, time.Now())
+	defer metrics.MeasureSince([]string{"raft", "rpc", "processHeartbeat"}, r.w.Now())
 
 	// Check if we are shutdown, just ignore the RPC
-	select {
-	case <-r.shutdownCh:
-		return
-	default:
+	{
+		var sel17 int
+		dst.Select(r.w,
+			dst.OnRecv(r.shutdownCh, func(_ struct{}, _ bool) { sel17 = 1 }),
+			dst.Default(func() { sel17 = 2 }),
+		)
+		switch sel17 {
+		case 1:
+			return
+		case 2:
+		default:
+			panic("dstmigrate: no select case ran")
+		}
 	}
 
 	// Ensure we are only handling a heartbeat
@@ -1456,7 +1713,7 @@ func (r *Raft) processHeartbeat(rpc RPC) {
 // appendEntries is invoked when we get an append entries RPC call. This must
 // only be called from the main thread.
 func (r *Raft) appendEntries(rpc RPC, a *AppendEntriesRequest) {
-	defer metrics.MeasureSince([]string{"raft", "rpc", "appendEntries"}, time.Now())
+	defer metrics.MeasureSince([]string{"raft", "rpc", "appendEntries"}, r.w.Now())
 	// Setup a response
 	resp := &AppendEntriesResponse{
 		RPCHeader:      r.getRPCHeader(),
@@ -1521,7 +1778,7 @@ func (r *Raft) appendEntries(rpc RPC, a *AppendEntriesRequest) {
 
 	// Process any new entries
 	if len(a.Entries) > 0 {
-		start := time.Now()
+		start := r.w.Now()
 
 		// Delete any conflicting entries, skip any duplicates
 		lastLogIdx, _ := r.getLastLog()
@@ -1587,7 +1844,7 @@ func (r *Raft) appendEntries(rpc RPC, a *AppendEntriesRequest) {
 
 	// Update the commit index
 	if a.LeaderCommitIndex > 0 && a.LeaderCommitIndex > r.getCommitIndex() {
-		start := time.Now()
+		start := r.w.Now()
 		idx := min(a.LeaderCommitIndex, r.getLastIndex())
 		r.setCommitIndex(idx)
 		if r.configurations.latestIndex <= idx {
@@ -1624,7 +1881,7 @@ func (r *Raft) processConfigurationLogEntry(entry *Log) error {
 
 // requestVote is invoked when we get a request vote RPC call.
 func (r *Raft) requestVote(rpc RPC, req *RequestVoteRequest) {
-	defer metrics.MeasureSince([]string{"raft", "rpc", "requestVote"}, time.Now())
+	defer metrics.MeasureSince([]string{"raft", "rpc", "requestVote"}, r.w.Now())
 	r.observe(*req)
 
 	// Setup a response
@@ -1757,7 +2014,7 @@ func (r *Raft) requestVote(rpc RPC, req *RequestVoteRequest) {
 
 // requestPreVote is invoked when we get a request Pre-Vote RPC call.
 func (r *Raft) requestPreVote(rpc RPC, req *RequestPreVoteRequest) {
-	defer metrics.MeasureSince([]string{"raft", "rpc", "requestPreVote"}, time.Now())
+	defer metrics.MeasureSince([]string{"raft", "rpc", "requestPreVote"}, r.w.Now())
 	r.observe(*req)
 
 	// Setup a response
@@ -1835,7 +2092,7 @@ func (r *Raft) requestPreVote(rpc RPC, req *RequestPreVoteRequest) {
 // too far behind a leader for log replay. This must only be called
 // from the main thread.
 func (r *Raft) installSnapshot(rpc RPC, req *InstallSnapshotRequest) {
-	defer metrics.MeasureSince([]string{"raft", "rpc", "installSnapshot"}, time.Now())
+	defer metrics.MeasureSince([]string{"raft", "rpc", "installSnapshot"}, r.w.Now())
 	// Setup a response
 	resp := &InstallSnapshotResponse{
 		Term:    r.getCurrentTerm(),
@@ -1905,7 +2162,7 @@ func (r *Raft) installSnapshot(rpc RPC, req *InstallSnapshotRequest) {
 	countingRPCReader := newCountingReader(rpc.Reader)
 
 	// Spill the remote snapshot to disk
-	transferMonitor := startSnapshotRestoreMonitor(r.logger, countingRPCReader, req.Size, true)
+	transferMonitor := startSnapshotRestoreMonitor(r.w, r.logger, countingRPCReader, req.Size, true)
 	n, err := io.Copy(sink, countingRPCReader)
 	transferMonitor.StopAndWait()
 	if err != nil {
@@ -1936,11 +2193,20 @@ func (r *Raft) installSnapshot(rpc RPC, req *InstallSnapshotRequest) {
 	future := &restoreFuture{ID: sink.ID()}
 	future.ShutdownCh = r.shutdownCh
 	future.init(r.w)
-	select {
-	case r.fsmMutateCh <- future:
-	case <-r.shutdownCh:
-		future.respond(ErrRaftShutdown)
-		return
+	{
+		var sel18 int
+		dst.Select(r.w,
+			dst.OnSend[interface{}](r.fsmMutateCh, future, func() { sel18 = 1 }),
+			dst.OnRecv(r.shutdownCh, func(_ struct{}, _ bool) { sel18 = 2 }),
+		)
+		switch sel18 {
+		case 1:
+		case 2:
+			future.respond(ErrRaftShutdown)
+			return
+		default:
+			panic("dstmigrate: no select case ran")
+		}
 	}
 
 	// Wait for the restore to happen
@@ -1978,7 +2244,7 @@ func (r *Raft) installSnapshot(rpc RPC, req *InstallSnapshotRequest) {
 // setLastContact is used to set the last contact time to now
 func (r *Raft) setLastContact() {
 	r.lastContactLock.Lock()
-	r.lastContact = time.Now()
+	r.lastContact = r.w.Now()
 	r.lastContactLock.Unlock()
 }
 
@@ -1996,9 +2262,9 @@ type preVoteResult struct {
 // ourself. This has the side affecting of incrementing the current term. The
 // response channel returned is used to wait for all the responses (including a
 // vote for ourself). This must only be called from the main thread.
-func (r *Raft) electSelf() <-chan *voteResult {
+func (r *Raft) electSelf() dst.Chan[*voteResult] {
 	// Create a response channel
-	respCh := make(chan *voteResult, len(r.configurations.latest.Servers))
+	respCh := dst.MakeChan[*voteResult](r.w, len(r.configurations.latest.Servers))
 
 	// Increment the term
 	newTerm := r.getCurrentTerm() + 1
@@ -2019,7 +2285,7 @@ func (r *Raft) electSelf() <-chan *voteResult {
 	// Construct a function to ask for a vote
 	askPeer := func(peer Server) {
 		r.goFunc(func() {
-			defer metrics.MeasureSince([]string{"raft", "candidate", "electSelf"}, time.Now())
+			defer metrics.MeasureSince([]string{"raft", "candidate", "electSelf"}, r.w.Now())
 			resp := &voteResult{voterID: peer.ID}
 			err := r.trans.RequestVote(peer.ID, peer.Address, req, &resp.RequestVoteResponse)
 			if err != nil {
@@ -2030,7 +2296,7 @@ func (r *Raft) electSelf() <-chan *voteResult {
 				resp.Term = req.Term
 				resp.Granted = false
 			}
-			respCh <- resp
+			respCh.Send(resp)
 		})
 	}
 
@@ -2043,18 +2309,19 @@ func (r *Raft) electSelf() <-chan *voteResult {
 				// Persist a vote for ourselves
 				if err := r.persistVote(req.Term, req.Addr); err != nil {
 					r.logger.Error("failed to persist vote", "error", err)
-					return nil
+					return (dst.Chan[*voteResult]{})
 
 				}
 				// Include our own vote
-				respCh <- &voteResult{
+				respCh.Send(&voteResult{
 					RequestVoteResponse: RequestVoteResponse{
 						RPCHeader: r.getRPCHeader(),
 						Term:      req.Term,
 						Granted:   true,
 					},
 					voterID: r.localID,
-				}
+				})
+
 			} else {
 				r.logger.Debug("asking for vote", "term", req.Term, "from", server.ID, "address", server.Address)
 				askPeer(server)
@@ -2070,7 +2337,7 @@ func (r *Raft) electSelf() <-chan *voteResult {
 // response channel returned is used to wait for all the responses (including a
 // vote for ourself).
 // This must only be called from the main thread.
-func (r *Raft) preElectSelf() <-chan *preVoteResult {
+func (r *Raft) preElectSelf() dst.Chan[*preVoteResult] {
 
 	// At this point transport should support pre-vote
 	// but check just in case
@@ -2080,7 +2347,7 @@ func (r *Raft) preElectSelf() <-chan *preVoteResult {
 	}
 
 	// Create a response channel
-	respCh := make(chan *preVoteResult, len(r.configurations.latest.Servers))
+	respCh := dst.MakeChan[*preVoteResult](r.w, len(r.configurations.latest.Servers))
 
 	// Propose the next term without actually changing our state
 	newTerm := r.getCurrentTerm() + 1
@@ -2097,7 +2364,7 @@ func (r *Raft) preElectSelf() <-chan *preVoteResult {
 	// Construct a function to ask for a vote
 	askPeer := func(peer Server) {
 		r.goFunc(func() {
-			defer metrics.MeasureSince([]string{"raft", "candidate", "preElectSelf"}, time.Now())
+			defer metrics.MeasureSince([]string{"raft", "candidate", "preElectSelf"}, r.w.Now())
 			resp := &preVoteResult{voterID: peer.ID}
 
 			err := prevoteTrans.RequestPreVote(peer.ID, peer.Address, req, &resp.RequestPreVoteResponse)
@@ -2119,7 +2386,7 @@ func (r *Raft) preElectSelf() <-chan *preVoteResult {
 				resp.Term = req.Term
 				resp.Granted = false
 			}
-			respCh <- resp
+			respCh.Send(resp)
 
 		})
 	}
@@ -2131,14 +2398,15 @@ func (r *Raft) preElectSelf() <-chan *preVoteResult {
 				r.logger.Debug("pre-voting for self", "term", req.Term, "id", r.localID)
 
 				// cast a pre-vote for our self
-				respCh <- &preVoteResult{
+				respCh.Send(&preVoteResult{
 					RequestPreVoteResponse: RequestPreVoteResponse{
 						RPCHeader: r.getRPCHeader(),
 						Term:      req.Term,
 						Granted:   true,
 					},
 					voterID: r.localID,
-				}
+				})
+
 			} else {
 				r.logger.Debug("asking for pre-vote", "term", req.Term, "from", server.ID, "address", server.Address)
 				askPeer(server)
@@ -2218,13 +2486,23 @@ func (r *Raft) initiateLeadershipTransfer(id *ServerID, address *ServerAddress) 
 		return future
 	}
 
-	select {
-	case r.leadershipTransferCh <- future:
-		return future
-	case <-r.shutdownCh:
-		return errorFuture{ErrRaftShutdown}
-	default:
-		return errorFuture{ErrEnqueueTimeout}
+	{
+		var sel19 int
+		dst.Select(r.w,
+			dst.OnSend(r.leadershipTransferCh, future, func() { sel19 = 1 }),
+			dst.OnRecv(r.shutdownCh, func(_ struct{}, _ bool) { sel19 = 2 }),
+			dst.Default(func() { sel19 = 3 }),
+		)
+		switch sel19 {
+		case 1:
+			return future
+		case 2:
+			return errorFuture{ErrRaftShutdown}
+		case 3:
+			return errorFuture{ErrEnqueueTimeout}
+		default:
+			panic("dstmigrate: no select case ran")
+		}
 	}
 }
 

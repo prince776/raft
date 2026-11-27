@@ -4,11 +4,11 @@
 package raft
 
 import (
-	"github.com/prince776/go-dst-kit/dst"
 	"fmt"
 	"io"
-	"sync"
 	"time"
+
+	"github.com/prince776/go-dst-kit/dst"
 )
 
 // Future is used to represent an action that may occur in the future.
@@ -92,16 +92,16 @@ func (e errorFuture) Index() uint64 {
 // to provide an error in the future.
 type deferError struct {
 	err        error
-	errCh      chan error
+	errCh      dst.Chan[error]
 	responded  bool
-	ShutdownCh chan struct{}
+	ShutdownCh dst.Chan[struct{}]
 
 	w *dst.World
 }
 
 func (d *deferError) init(w *dst.World) {
 	d.w = w
-	d.errCh = make(chan error, 1)
+	d.errCh = dst.MakeChan[error](d.w, 1)
 }
 
 func (d *deferError) Error() error {
@@ -111,26 +111,37 @@ func (d *deferError) Error() error {
 		// send so we'll still return nil below.
 		return d.err
 	}
-	if d.errCh == nil {
+	if d.errCh == (dst.Chan[error]{}) {
 		panic("waiting for response on nil channel")
 	}
-	select {
-	case d.err = <-d.errCh:
-	case <-d.ShutdownCh:
-		d.err = ErrRaftShutdown
+	{
+		var sel1 int
+		var sel1v1 error
+		dst.Select(d.w,
+			dst.OnRecv(d.errCh, func(v error, _ bool) { sel1 = 1; sel1v1 = v }),
+			dst.OnRecv(d.ShutdownCh, func(_ struct{}, _ bool) { sel1 = 2 }),
+		)
+		switch sel1 {
+		case 1:
+			d.err = sel1v1
+		case 2:
+			d.err = ErrRaftShutdown
+		default:
+			panic("dstmigrate: no select case ran")
+		}
 	}
 	return d.err
 }
 
 func (d *deferError) respond(err error) {
-	if d.errCh == nil {
+	if d.errCh == (dst.Chan[error]{}) {
 		return
 	}
 	if d.responded {
 		return
 	}
-	d.errCh <- err
-	close(d.errCh)
+	d.errCh.Send(err)
+	d.errCh.Close()
 	d.responded = true
 }
 
@@ -241,10 +252,10 @@ type restoreFuture struct {
 // the leader. This is to prevent a stale read.
 type verifyFuture struct {
 	deferError
-	notifyCh   chan *verifyFuture
+	notifyCh   dst.Chan[*verifyFuture]
 	quorumSize int
 	votes      int
-	voteLock   sync.Mutex
+	voteLock   dst.Mutex
 }
 
 // leadershipTransferFuture is used to track the progress of a leadership
@@ -280,19 +291,19 @@ func (v *verifyFuture) vote(leader bool) {
 	defer v.voteLock.Unlock()
 
 	// Guard against having notified already
-	if v.notifyCh == nil {
+	if v.notifyCh == (dst.Chan[*verifyFuture]{}) {
 		return
 	}
 
 	if leader {
 		v.votes++
 		if v.votes >= v.quorumSize {
-			v.notifyCh <- v
-			v.notifyCh = nil
+			v.notifyCh.Send(v)
+			v.notifyCh = (dst.Chan[*verifyFuture]{})
 		}
 	} else {
-		v.notifyCh <- v
-		v.notifyCh = nil
+		v.notifyCh.Send(v)
+		v.notifyCh = (dst.Chan[*verifyFuture]{})
 	}
 }
 

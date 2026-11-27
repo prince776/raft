@@ -5,8 +5,9 @@ package raft
 
 import (
 	"errors"
-	"sync"
 	"sync/atomic"
+
+	"github.com/prince776/go-dst-kit/dst"
 )
 
 var _ CommitTrackingLogStore = &InmemCommitTrackingStore{}
@@ -15,7 +16,7 @@ var _ CommitTrackingLogStore = &InmemCommitTrackingStore{}
 // It should NOT EVER be used for production. It is used only for
 // unit tests. Use the MDBStore implementation instead.
 type InmemStore struct {
-	l         sync.RWMutex
+	l         dst.RWMutex
 	lowIndex  uint64
 	highIndex uint64
 	logs      map[uint64]*Log

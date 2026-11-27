@@ -4,12 +4,12 @@
 package raft
 
 import (
-	"github.com/prince776/go-dst-kit/dst"
 	"errors"
 	"fmt"
-	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/prince776/go-dst-kit/dst"
 
 	"github.com/hashicorp/go-metrics"
 )
@@ -47,7 +47,7 @@ type followerReplication struct {
 	// peer contains the network address and ID of the remote follower.
 	peer Server
 	// peerLock protects 'peer'
-	peerLock sync.RWMutex
+	peerLock dst.RWMutex
 
 	// commitment tracks the entries acknowledged by followers so that the
 	// leader's commit index can advance. It is updated on successful
@@ -58,21 +58,21 @@ type followerReplication struct {
 	// removed from the cluster. In the follower removed case, it carries a log
 	// index; replication should be attempted with a best effort up through that
 	// index, before exiting.
-	stopCh chan uint64
+	stopCh dst.Chan[uint64]
 
 	// triggerCh is notified every time new entries are appended to the log.
-	triggerCh chan struct{}
+	triggerCh dst.Chan[struct{}]
 
 	// triggerDeferErrorCh is used to provide a backchannel. By sending a
 	// deferErr, the sender can be notified when the replication is done.
-	triggerDeferErrorCh chan *deferError
+	triggerDeferErrorCh dst.Chan[*deferError]
 
 	// lastContact is updated to the current time whenever any response is
 	// received from the follower (successful or not). This is used to check
 	// whether the leader should step down (Raft.checkLeaderLease()).
 	lastContact time.Time
 	// lastContactLock protects 'lastContact'.
-	lastContactLock sync.RWMutex
+	lastContactLock dst.RWMutex
 
 	// failures counts the number of failed RPCs since the last success, which is
 	// used to apply backoff.
@@ -80,16 +80,16 @@ type followerReplication struct {
 
 	// notifyCh is notified to send out a heartbeat, which is used to check that
 	// this server is still leader.
-	notifyCh chan struct{}
+	notifyCh dst.Chan[struct{}]
 	// notify is a map of futures to be resolved upon receipt of an
 	// acknowledgement, then cleared from this map.
 	notify map[*verifyFuture]struct{}
 	// notifyLock protects 'notify'.
-	notifyLock sync.Mutex
+	notifyLock dst.Mutex
 
 	// stepDown is used to indicate to the leader that we
 	// should step down based on information from a follower.
-	stepDown chan struct{}
+	stepDown dst.Chan[struct{}]
 
 	// allowPipeline is used to determine when to pipeline the AppendEntries RPCs.
 	// It is private to this replication goroutine.
@@ -131,7 +131,7 @@ func (s *followerReplication) LastContact() time.Time {
 // setLastContact sets the last contact to the current time.
 func (s *followerReplication) setLastContact() {
 	s.lastContactLock.Lock()
-	s.lastContact = time.Now()
+	s.lastContact = s.w.Now()
 	s.lastContactLock.Unlock()
 }
 
@@ -139,39 +139,54 @@ func (s *followerReplication) setLastContact() {
 // follower.
 func (r *Raft) replicate(s *followerReplication) {
 	// Start an async heartbeating routing
-	stopHeartbeat := make(chan struct{})
-	defer close(stopHeartbeat)
+	stopHeartbeat := dst.MakeChan[struct{}](r.w, 0)
+	defer stopHeartbeat.Close()
 	r.goFunc(func() { r.heartbeat(s, stopHeartbeat) })
 
 RPC:
 	shouldStop := false
 	for !shouldStop {
-		select {
-		case maxIndex := <-s.stopCh:
-			// Make a best effort to replicate up to this index
-			if maxIndex > 0 {
-				r.replicateTo(s, maxIndex)
+		{
+			var sel1 int
+			var sel1v1 uint64
+			var sel1v2 *deferError
+			dst.Select(r.w,
+				dst.OnRecv(s.stopCh, func(v uint64, _ bool) { sel1 = 1; sel1v1 = v }),
+				dst.OnRecv(s.triggerDeferErrorCh, func(v *deferError, _ bool) { sel1 = 2; sel1v2 = v }),
+				dst.OnRecv(s.triggerCh, func(_ struct{}, _ bool) { sel1 = 3 }),
+				dst.OnRecv(randomTimeout(r.w, r.config().CommitTimeout), func(_ time.Time, _ bool) { sel1 = 4 }),
+			)
+			switch sel1 {
+			case 1:
+				maxIndex := sel1v1
+				// Make a best effort to replicate up to this index
+				if maxIndex > 0 {
+					r.replicateTo(s, maxIndex)
+				}
+				return
+			case 2:
+				deferErr := sel1v2
+				lastLogIdx, _ := r.getLastLog()
+				shouldStop = r.replicateTo(s, lastLogIdx)
+				if !shouldStop {
+					deferErr.respond(nil)
+				} else {
+					deferErr.respond(fmt.Errorf("replication failed"))
+				}
+			case 3:
+				lastLogIdx, _ := r.getLastLog()
+				shouldStop = r.replicateTo(s, lastLogIdx)
+			// This is _not_ our heartbeat mechanism but is to ensure
+			// followers quickly learn the leader's commit index when
+			// raft commits stop flowing naturally. The actual heartbeats
+			// can't do this to keep them unblocked by disk IO on the
+			// follower. See https://github.com/hashicorp/raft/issues/282.
+			case 4:
+				lastLogIdx, _ := r.getLastLog()
+				shouldStop = r.replicateTo(s, lastLogIdx)
+			default:
+				panic("dstmigrate: no select case ran")
 			}
-			return
-		case deferErr := <-s.triggerDeferErrorCh:
-			lastLogIdx, _ := r.getLastLog()
-			shouldStop = r.replicateTo(s, lastLogIdx)
-			if !shouldStop {
-				deferErr.respond(nil)
-			} else {
-				deferErr.respond(fmt.Errorf("replication failed"))
-			}
-		case <-s.triggerCh:
-			lastLogIdx, _ := r.getLastLog()
-			shouldStop = r.replicateTo(s, lastLogIdx)
-		// This is _not_ our heartbeat mechanism but is to ensure
-		// followers quickly learn the leader's commit index when
-		// raft commits stop flowing naturally. The actual heartbeats
-		// can't do this to keep them unblocked by disk IO on the
-		// follower. See https://github.com/hashicorp/raft/issues/282.
-		case <-randomTimeout(r.config().CommitTimeout):
-			lastLogIdx, _ := r.getLastLog()
-			shouldStop = r.replicateTo(s, lastLogIdx)
 		}
 
 		// If things looks healthy, switch to pipeline mode
@@ -212,9 +227,18 @@ func (r *Raft) replicateTo(s *followerReplication, lastIndex uint64) (shouldStop
 START:
 	// Prevent an excessive retry rate on errors
 	if s.failures > 0 {
-		select {
-		case <-time.After(backoff(failureWait, s.failures, maxFailureScale)):
-		case <-r.shutdownCh:
+		{
+			var sel2 int
+			dst.Select(r.w,
+				dst.OnRecv(r.w.After(backoff(failureWait, s.failures, maxFailureScale)), func(_ time.Time, _ bool) { sel2 = 1 }),
+				dst.OnRecv(r.shutdownCh, func(_ struct{}, _ bool) { sel2 = 2 }),
+			)
+			switch sel2 {
+			case 1:
+			case 2:
+			default:
+				panic("dstmigrate: no select case ran")
+			}
 		}
 	}
 
@@ -230,7 +254,7 @@ START:
 	}
 
 	// Make the RPC call
-	start = time.Now()
+	start = r.w.Now()
 	if err := r.trans.AppendEntries(peer.ID, peer.Address, &req, &resp); err != nil {
 		r.logger.Error("failed to appendEntries to", "peer", peer, "error", err)
 		s.failures++
@@ -271,10 +295,19 @@ CHECK_MORE:
 	// where we are asked to replicate to a given index and then shutdown,
 	// it's better to not loop in here to send lots of entries to a straggler
 	// that's leaving the cluster anyways.
-	select {
-	case <-s.stopCh:
-		return true
-	default:
+	{
+		var sel3 int
+		dst.Select(r.w,
+			dst.OnRecv(s.stopCh, func(_ uint64, _ bool) { sel3 = 1 }),
+			dst.Default(func() { sel3 = 2 }),
+		)
+		switch sel3 {
+		case 1:
+			return true
+		case 2:
+		default:
+			panic("dstmigrate: no select case ran")
+		}
 	}
 
 	// Check if there are more logs to replicate
@@ -343,7 +376,7 @@ func (r *Raft) sendLatestSnapshot(s *followerReplication) (bool, error) {
 
 	r.logger.Info("installing snapshot on", "peer", peer.ID, "id", snapID, "size", req.Size)
 	// Make the call
-	start := time.Now()
+	start := r.w.Now()
 	var resp InstallSnapshotResponse
 	if err := r.trans.InstallSnapshot(peer.ID, peer.Address, &req, &resp, snapshot); err != nil {
 		r.logger.Error("failed to install snapshot", "peer", peer.ID, "id", snapID, "error", err)
@@ -388,7 +421,7 @@ func (r *Raft) sendLatestSnapshot(s *followerReplication) (bool, error) {
 // heartbeat is used to periodically invoke AppendEntries on a peer
 // to ensure they don't time out. This is done async of replicate(),
 // since that routine could potentially be blocked on disk IO.
-func (r *Raft) heartbeat(s *followerReplication, stopCh chan struct{}) {
+func (r *Raft) heartbeat(s *followerReplication, stopCh dst.Chan[struct{}]) {
 	var failures uint64
 	req := AppendEntriesRequest{
 		RPCHeader: r.getRPCHeader(),
@@ -400,28 +433,47 @@ func (r *Raft) heartbeat(s *followerReplication, stopCh chan struct{}) {
 	var resp AppendEntriesResponse
 	for {
 		// Wait for the next heartbeat interval or forced notify
-		select {
-		case <-s.notifyCh:
-		case <-randomTimeout(r.config().HeartbeatTimeout / 10):
-		case <-stopCh:
-			return
+		{
+			var sel4 int
+			dst.Select(r.w,
+				dst.OnRecv(s.notifyCh, func(_ struct{}, _ bool) { sel4 = 1 }),
+				dst.OnRecv(randomTimeout(r.w, r.config().HeartbeatTimeout/10), func(_ time.Time, _ bool) { sel4 = 2 }),
+				dst.OnRecv(stopCh, func(_ struct{}, _ bool) { sel4 = 3 }),
+			)
+			switch sel4 {
+			case 1:
+			case 2:
+			case 3:
+				return
+			default:
+				panic("dstmigrate: no select case ran")
+			}
 		}
 
 		s.peerLock.RLock()
 		peer := s.peer
 		s.peerLock.RUnlock()
 
-		start := time.Now()
+		start := r.w.Now()
 		if err := r.trans.AppendEntries(peer.ID, peer.Address, &req, &resp); err != nil {
 			nextBackoffTime := cappedExponentialBackoff(failureWait, failures, maxFailureScale, r.config().HeartbeatTimeout/2)
 			r.logger.Error("failed to heartbeat to", "peer", peer.Address, "backoff time",
 				nextBackoffTime, "error", err)
 			r.observe(FailedHeartbeatObservation{PeerID: peer.ID, LastContact: s.LastContact()})
 			failures++
-			select {
-			case <-time.After(nextBackoffTime):
-			case <-stopCh:
-				return
+			{
+				var sel5 int
+				dst.Select(r.w,
+					dst.OnRecv(r.w.After(nextBackoffTime), func(_ time.Time, _ bool) { sel5 = 1 }),
+					dst.OnRecv(stopCh, func(_ struct{}, _ bool) { sel5 = 2 }),
+				)
+				switch sel5 {
+				case 1:
+				case 2:
+					return
+				default:
+					panic("dstmigrate: no select case ran")
+				}
 			}
 		} else {
 			if failures > 0 {
@@ -463,8 +515,8 @@ func (r *Raft) pipelineReplicate(s *followerReplication) error {
 	defer r.logger.Info("aborting pipeline replication", "peer", peer)
 
 	// Create a shutdown and finish channel
-	stopCh := make(chan struct{})
-	finishCh := make(chan struct{})
+	stopCh := dst.MakeChan[struct{}](r.w, 0)
+	finishCh := dst.MakeChan[struct{}](r.w, 0)
 
 	// Start a dedicated decoder
 	r.goFunc(func() { r.pipelineDecode(s, pipeline, stopCh, finishCh) })
@@ -475,37 +527,62 @@ func (r *Raft) pipelineReplicate(s *followerReplication) error {
 	shouldStop := false
 SEND:
 	for !shouldStop {
-		select {
-		case <-finishCh:
-			break SEND
-		case maxIndex := <-s.stopCh:
-			// Make a best effort to replicate up to this index
-			if maxIndex > 0 {
-				r.pipelineSend(s, pipeline, &nextIndex, maxIndex)
+		{
+			var sel6 int
+			var sel6v2 uint64
+			var sel6v3 *deferError
+			dst.Select(r.w,
+				dst.OnRecv(finishCh, func(_ struct{}, _ bool) { sel6 = 1 }),
+				dst.OnRecv(s.stopCh, func(v uint64, _ bool) { sel6 = 2; sel6v2 = v }),
+				dst.OnRecv(s.triggerDeferErrorCh, func(v *deferError, _ bool) { sel6 = 3; sel6v3 = v }),
+				dst.OnRecv(s.triggerCh, func(_ struct{}, _ bool) { sel6 = 4 }),
+				dst.OnRecv(randomTimeout(r.w, r.config().CommitTimeout), func(_ time.Time, _ bool) { sel6 = 5 }),
+			)
+			switch sel6 {
+			case 1:
+				break SEND
+			case 2:
+				maxIndex := sel6v2
+				// Make a best effort to replicate up to this index
+				if maxIndex > 0 {
+					r.pipelineSend(s, pipeline, &nextIndex, maxIndex)
+				}
+				break SEND
+			case 3:
+				deferErr := sel6v3
+				lastLogIdx, _ := r.getLastLog()
+				shouldStop = r.pipelineSend(s, pipeline, &nextIndex, lastLogIdx)
+				if !shouldStop {
+					deferErr.respond(nil)
+				} else {
+					deferErr.respond(fmt.Errorf("replication failed"))
+				}
+			case 4:
+				lastLogIdx, _ := r.getLastLog()
+				shouldStop = r.pipelineSend(s, pipeline, &nextIndex, lastLogIdx)
+			case 5:
+				lastLogIdx, _ := r.getLastLog()
+				shouldStop = r.pipelineSend(s, pipeline, &nextIndex, lastLogIdx)
+			default:
+				panic("dstmigrate: no select case ran")
 			}
-			break SEND
-		case deferErr := <-s.triggerDeferErrorCh:
-			lastLogIdx, _ := r.getLastLog()
-			shouldStop = r.pipelineSend(s, pipeline, &nextIndex, lastLogIdx)
-			if !shouldStop {
-				deferErr.respond(nil)
-			} else {
-				deferErr.respond(fmt.Errorf("replication failed"))
-			}
-		case <-s.triggerCh:
-			lastLogIdx, _ := r.getLastLog()
-			shouldStop = r.pipelineSend(s, pipeline, &nextIndex, lastLogIdx)
-		case <-randomTimeout(r.config().CommitTimeout):
-			lastLogIdx, _ := r.getLastLog()
-			shouldStop = r.pipelineSend(s, pipeline, &nextIndex, lastLogIdx)
 		}
 	}
 
 	// Stop our decoder, and wait for it to finish
-	close(stopCh)
-	select {
-	case <-finishCh:
-	case <-r.shutdownCh:
+	stopCh.Close()
+	{
+		var sel7 int
+		dst.Select(r.w,
+			dst.OnRecv(finishCh, func(_ struct{}, _ bool) { sel7 = 1 }),
+			dst.OnRecv(r.shutdownCh, func(_ struct{}, _ bool) { sel7 = 2 }),
+		)
+		switch sel7 {
+		case 1:
+		case 2:
+		default:
+			panic("dstmigrate: no select case ran")
+		}
 	}
 	return nil
 }
@@ -534,37 +611,48 @@ func (r *Raft) pipelineSend(s *followerReplication, p AppendPipeline, nextIdx *u
 }
 
 // pipelineDecode is used to decode the responses of pipelined requests.
-func (r *Raft) pipelineDecode(s *followerReplication, p AppendPipeline, stopCh, finishCh chan struct{}) {
-	defer close(finishCh)
+func (r *Raft) pipelineDecode(s *followerReplication, p AppendPipeline, stopCh, finishCh dst.Chan[struct{}]) {
+	defer finishCh.Close()
 	respCh := p.Consumer()
 	for {
-		select {
-		case ready := <-respCh:
-			s.peerLock.RLock()
-			peer := s.peer
-			s.peerLock.RUnlock()
+		{
+			var sel8 int
+			var sel8v1 AppendFuture
+			dst.Select(r.w,
+				dst.OnRecv(respCh, func(v AppendFuture, _ bool) { sel8 = 1; sel8v1 = v }),
+				dst.OnRecv(stopCh, func(_ struct{}, _ bool) { sel8 = 2 }),
+			)
+			switch sel8 {
+			case 1:
+				ready := sel8v1
+				s.peerLock.RLock()
+				peer := s.peer
+				s.peerLock.RUnlock()
 
-			req, resp := ready.Request(), ready.Response()
-			appendStats(string(peer.ID), ready.Start(), float32(len(req.Entries)), r.noLegacyTelemetry)
+				req, resp := ready.Request(), ready.Response()
+				appendStats(string(peer.ID), ready.Start(), float32(len(req.Entries)), r.noLegacyTelemetry)
 
-			// Check for a newer term, stop running
-			if resp.Term > req.Term {
-				r.handleStaleTerm(s)
+				// Check for a newer term, stop running
+				if resp.Term > req.Term {
+					r.handleStaleTerm(s)
+					return
+				}
+
+				// Update the last contact
+				s.setLastContact()
+
+				// Abort pipeline if not successful
+				if !resp.Success {
+					return
+				}
+
+				// Update our replication state
+				updateLastAppended(s, req)
+			case 2:
 				return
+			default:
+				panic("dstmigrate: no select case ran")
 			}
-
-			// Update the last contact
-			s.setLastContact()
-
-			// Abort pipeline if not successful
-			if !resp.Success {
-				return
-			}
-
-			// Update our replication state
-			updateLastAppended(s, req)
-		case <-stopCh:
-			return
 		}
 	}
 }

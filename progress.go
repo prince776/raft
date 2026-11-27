@@ -4,11 +4,11 @@
 package raft
 
 import (
-	"github.com/prince776/go-dst-kit/dst"
 	"context"
 	"io"
-	"sync"
 	"time"
+
+	"github.com/prince776/go-dst-kit/dst"
 
 	hclog "github.com/hashicorp/go-hclog"
 )
@@ -23,14 +23,15 @@ type snapshotRestoreMonitor struct {
 	size            int64
 	networkTransfer bool
 
-	once   sync.Once
+	once   dst.Once
 	cancel func()
-	doneCh chan struct{}
+	doneCh dst.Chan[struct{}]
 
 	w *dst.World
 }
 
 func startSnapshotRestoreMonitor(
+	w *dst.World,
 	logger hclog.Logger,
 	cr CountingReader,
 	size int64,
@@ -44,29 +45,39 @@ func startSnapshotRestoreMonitor(
 		size:            size,
 		networkTransfer: networkTransfer,
 		cancel:          cancel,
-		doneCh:          make(chan struct{}),
+		w:               w,
+		doneCh:          dst.MakeChan[struct{}](w, 0),
 	}
-	go m.run(ctx)
+	w.Go(func() { m.run(ctx) })
 	return m
 }
 
 func (m *snapshotRestoreMonitor) run(ctx context.Context) {
-	defer close(m.doneCh)
+	defer m.doneCh.Close()
 
-	ticker := time.NewTicker(snapshotRestoreMonitorInterval)
+	ticker := m.w.NewTicker(snapshotRestoreMonitorInterval)
 	defer ticker.Stop()
 
 	ranOnce := false
 	for {
-		select {
-		case <-ctx.Done():
-			if !ranOnce {
+		{
+			var sel1 int
+			dst.Select(m.w,
+				dst.OnDone(ctx, func() { sel1 = 1 }),
+				dst.OnRecv(ticker.C, func(_ time.Time, _ bool) { sel1 = 2 }),
+			)
+			switch sel1 {
+			case 1:
+				if !ranOnce {
+					m.runOnce()
+				}
+				return
+			case 2:
 				m.runOnce()
+				ranOnce = true
+			default:
+				panic("dstmigrate: no select case ran")
 			}
-			return
-		case <-ticker.C:
-			m.runOnce()
-			ranOnce = true
 		}
 	}
 }
@@ -89,7 +100,7 @@ func (m *snapshotRestoreMonitor) runOnce() {
 func (m *snapshotRestoreMonitor) StopAndWait() {
 	m.once.Do(func() {
 		m.cancel()
-		<-m.doneCh
+		m.doneCh.Recv()
 	})
 }
 
@@ -101,7 +112,7 @@ type CountingReader interface {
 type countingReader struct {
 	reader io.Reader
 
-	mu    sync.Mutex
+	mu    dst.Mutex
 	bytes int64
 }
 

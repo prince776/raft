@@ -12,7 +12,7 @@ import (
 
 func TestSaturationMetric(t *testing.T) {
 	t.Run("without smoothing", func(t *testing.T) {
-		sat := newSaturationMetric([]string{"metric"}, 100*time.Millisecond)
+		sat := newSaturationMetric(theRealWorld(), []string{"metric"}, 100*time.Millisecond)
 
 		now := sat.lastReport
 		sat.nowFn = func() time.Time { return now }
@@ -53,7 +53,7 @@ func TestSaturationMetric(t *testing.T) {
 
 func TestSaturationMetric_IncorrectUsage(t *testing.T) {
 	t.Run("calling sleeping() consecutively", func(t *testing.T) {
-		sat := newSaturationMetric([]string{"metric"}, 50*time.Millisecond)
+		sat := newSaturationMetric(theRealWorld(), []string{"metric"}, 50*time.Millisecond)
 
 		now := sat.lastReport
 		sat.nowFn = func() time.Time { return now }
@@ -93,7 +93,7 @@ func TestSaturationMetric_IncorrectUsage(t *testing.T) {
 	})
 
 	t.Run("calling working() consecutively", func(t *testing.T) {
-		sat := newSaturationMetric([]string{"metric"}, 30*time.Millisecond)
+		sat := newSaturationMetric(theRealWorld(), []string{"metric"}, 30*time.Millisecond)
 
 		now := sat.lastReport
 		sat.nowFn = func() time.Time { return now }
@@ -125,7 +125,7 @@ func TestSaturationMetric_IncorrectUsage(t *testing.T) {
 	})
 
 	t.Run("calling working() first", func(t *testing.T) {
-		sat := newSaturationMetric([]string{"metric"}, 10*time.Millisecond)
+		sat := newSaturationMetric(theRealWorld(), []string{"metric"}, 10*time.Millisecond)
 
 		now := sat.lastReport
 		sat.nowFn = func() time.Time { return now }

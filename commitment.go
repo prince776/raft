@@ -5,7 +5,8 @@ package raft
 
 import (
 	"sort"
-	"sync"
+
+	"github.com/prince776/go-dst-kit/dst"
 )
 
 // Commitment is used to advance the leader's commit index. The leader and
@@ -13,9 +14,9 @@ import (
 // this notifies on commitCh when the commit index has advanced.
 type commitment struct {
 	// protects matchIndexes and commitIndex
-	sync.Mutex
+	dst.Mutex
 	// notified when commitIndex increases
-	commitCh chan struct{}
+	commitCh dst.Chan[struct{}]
 	// voter ID to log index: the server stores up through this log entry
 	matchIndexes map[ServerID]uint64
 	// a quorum stores up through this log entry. monotonically increases.
@@ -32,7 +33,7 @@ type commitment struct {
 // 'configuration' is the servers in the cluster.
 // 'startIndex' is the first index created in this term (see
 // its description above).
-func newCommitment(commitCh chan struct{}, configuration Configuration, startIndex uint64) *commitment {
+func newCommitment(commitCh dst.Chan[struct{}], configuration Configuration, startIndex uint64) *commitment {
 	matchIndexes := make(map[ServerID]uint64)
 	for _, server := range configuration.Servers {
 		if server.Suffrage == Voter {

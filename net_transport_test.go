@@ -10,12 +10,12 @@ import (
 	"net"
 	"reflect"
 	"strings"
-	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/hashicorp/go-hclog"
+	"github.com/prince776/go-dst-kit/dst"
 	"github.com/stretchr/testify/require"
 )
 
@@ -61,26 +61,37 @@ func TestNetworkTransport_CloseStreams(t *testing.T) {
 	// errCh is used to report errors from any of the goroutines
 	// created in this test.
 	// It is buffered as to not block.
-	errCh := make(chan error, 100)
+	errCh := dst.MakeChan[error](theRealWorld(), 100)
 
 	// Listen for a request
-	go func() {
+	theRealWorld().Go(func() {
 		for {
-			select {
-			case rpc := <-rpcCh:
-				// Verify the command
-				req := rpc.Command.(*AppendEntriesRequest)
-				if !reflect.DeepEqual(req, &args) {
-					errCh <- fmt.Errorf("command mismatch: %#v %#v", *req, args)
-					return
-				}
-				rpc.Respond(&resp, nil)
+			{
+				var sel1 int
+				var sel1v1 RPC
+				dst.Select(theRealWorld(),
+					dst.OnRecv(rpcCh, func(v RPC, _ bool) { sel1 = 1; sel1v1 = v }),
+					dst.OnRecv(theRealWorld().After(200*time.Millisecond), func(_ time.Time, _ bool) { sel1 = 2 }),
+				)
+				switch sel1 {
+				case 1:
+					rpc := sel1v1
+					// Verify the command
+					req := rpc.Command.(*AppendEntriesRequest)
+					if !reflect.DeepEqual(req, &args) {
+						errCh.Send(fmt.Errorf("command mismatch: %#v %#v", *req, args))
+						return
+					}
+					rpc.Respond(&resp, nil)
 
-			case <-time.After(200 * time.Millisecond):
-				return
+				case 2:
+					return
+				default:
+					panic("dstmigrate: no select case ran")
+				}
 			}
 		}
-	}()
+	})
 
 	// Transport 2 makes outbound request, 3 conn pool
 	trans2, err := NewTCPTransportWithLogger("localhost:0", nil, 3, time.Second, newTestLogger(t))
@@ -91,33 +102,34 @@ func TestNetworkTransport_CloseStreams(t *testing.T) {
 
 	for i := 0; i < 2; i++ {
 		// Create wait group
-		wg := &sync.WaitGroup{}
+		wg := &dst.WaitGroup{}
 
 		// Try to do parallel appends, should stress the conn pool
 		for i = 0; i < 5; i++ {
 			wg.Add(1)
-			go func() {
+			theRealWorld().Go(func() {
 				defer wg.Done()
 				var out AppendEntriesResponse
 				if err := trans2.AppendEntries("id1", trans1.LocalAddr(), &args, &out); err != nil {
-					errCh <- err
+					errCh.Send(err)
 					return
 				}
 
 				// Verify the response
 				if !reflect.DeepEqual(resp, out) {
-					errCh <- fmt.Errorf("command mismatch: %#v %#v", resp, out)
+					errCh.Send(fmt.Errorf("command mismatch: %#v %#v", resp, out))
 					return
 				}
-			}()
+			})
+
 		}
 
 		// Wait for the routines to finish
 		wg.Wait()
 
 		// Check if we received any errors from the above goroutines.
-		if len(errCh) > 0 {
-			t.Fatal(<-errCh)
+		if errCh.Len() > 0 {
+			t.Fatal(dstRecv(errCh))
 		}
 
 		// Check the conn pool size
@@ -240,22 +252,33 @@ func TestNetworkTransport_AppendEntries(t *testing.T) {
 		resp := makeAppendRPCResponse()
 
 		// Listen for a request
-		go func() {
-			select {
-			case rpc := <-rpcCh:
-				// Verify the command
-				req := rpc.Command.(*AppendEntriesRequest)
-				if !reflect.DeepEqual(req, &args) {
-					t.Errorf("command mismatch: %#v %#v", *req, args)
-					return
+		theRealWorld().Go(func() {
+			{
+				var sel2 int
+				var sel2v1 RPC
+				dst.Select(theRealWorld(),
+					dst.OnRecv(rpcCh, func(v RPC, _ bool) { sel2 = 1; sel2v1 = v }),
+					dst.OnRecv(theRealWorld().After(200*time.Millisecond), func(_ time.Time, _ bool) { sel2 = 2 }),
+				)
+				switch sel2 {
+				case 1:
+					rpc := sel2v1
+					// Verify the command
+					req := rpc.Command.(*AppendEntriesRequest)
+					if !reflect.DeepEqual(req, &args) {
+						t.Errorf("command mismatch: %#v %#v", *req, args)
+						return
+					}
+
+					rpc.Respond(&resp, nil)
+
+				case 2:
+					t.Errorf("timeout")
+				default:
+					panic("dstmigrate: no select case ran")
 				}
-
-				rpc.Respond(&resp, nil)
-
-			case <-time.After(200 * time.Millisecond):
-				t.Errorf("timeout")
 			}
-		}()
+		})
 
 		// Transport 2 makes outbound request
 		trans2, err := makeTransport(t, useAddrProvider, string(trans1.LocalAddr()))
@@ -292,24 +315,35 @@ func TestNetworkTransport_AppendEntriesPipeline(t *testing.T) {
 		resp := makeAppendRPCResponse()
 
 		// Listen for a request
-		go func() {
+		theRealWorld().Go(func() {
 			for i := 0; i < 10; i++ {
-				select {
-				case rpc := <-rpcCh:
-					// Verify the command
-					req := rpc.Command.(*AppendEntriesRequest)
-					if !reflect.DeepEqual(req, &args) {
-						t.Errorf("command mismatch: %#v %#v", *req, args)
-						return
-					}
-					rpc.Respond(&resp, nil)
+				{
+					var sel3 int
+					var sel3v1 RPC
+					dst.Select(theRealWorld(),
+						dst.OnRecv(rpcCh, func(v RPC, _ bool) { sel3 = 1; sel3v1 = v }),
+						dst.OnRecv(theRealWorld().After(200*time.Millisecond), func(_ time.Time, _ bool) { sel3 = 2 }),
+					)
+					switch sel3 {
+					case 1:
+						rpc := sel3v1
+						// Verify the command
+						req := rpc.Command.(*AppendEntriesRequest)
+						if !reflect.DeepEqual(req, &args) {
+							t.Errorf("command mismatch: %#v %#v", *req, args)
+							return
+						}
+						rpc.Respond(&resp, nil)
 
-				case <-time.After(200 * time.Millisecond):
-					t.Errorf("timeout")
-					return
+					case 2:
+						t.Errorf("timeout")
+						return
+					default:
+						panic("dstmigrate: no select case ran")
+					}
 				}
 			}
-		}()
+		})
 
 		// Transport 2 makes outbound request
 		trans2, err := makeTransport(t, useAddrProvider, string(trans1.LocalAddr()))
@@ -331,14 +365,25 @@ func TestNetworkTransport_AppendEntriesPipeline(t *testing.T) {
 
 		respCh := pipeline.Consumer()
 		for i := 0; i < 10; i++ {
-			select {
-			case ready := <-respCh:
-				// Verify the response
-				if !reflect.DeepEqual(&resp, ready.Response()) {
-					t.Fatalf("command mismatch: %#v %#v", &resp, ready.Response())
+			{
+				var sel4 int
+				var sel4v1 AppendFuture
+				dst.Select(theRealWorld(),
+					dst.OnRecv(respCh, func(v AppendFuture, _ bool) { sel4 = 1; sel4v1 = v }),
+					dst.OnRecv(theRealWorld().After(200*time.Millisecond), func(_ time.Time, _ bool) { sel4 = 2 }),
+				)
+				switch sel4 {
+				case 1:
+					ready := sel4v1
+					// Verify the response
+					if !reflect.DeepEqual(&resp, ready.Response()) {
+						t.Fatalf("command mismatch: %#v %#v", &resp, ready.Response())
+					}
+				case 2:
+					t.Fatalf("timeout")
+				default:
+					panic("dstmigrate: no select case ran")
 				}
-			case <-time.After(200 * time.Millisecond):
-				t.Fatalf("timeout")
 			}
 		}
 		_ = pipeline.Close()
@@ -359,27 +404,38 @@ func TestNetworkTransport_AppendEntriesPipeline_CloseStreams(t *testing.T) {
 	args := makeAppendRPC()
 	resp := makeAppendRPCResponse()
 
-	shutdownCh := make(chan struct{})
-	defer close(shutdownCh)
+	shutdownCh := dst.MakeChan[struct{}](theRealWorld(), 0)
+	defer shutdownCh.Close()
 
 	// Listen for a request
-	go func() {
+	theRealWorld().Go(func() {
 		for {
-			select {
-			case rpc := <-rpcCh:
-				// Verify the command
-				req := rpc.Command.(*AppendEntriesRequest)
-				if !reflect.DeepEqual(req, &args) {
-					t.Errorf("command mismatch: %#v %#v", *req, args)
-					return
-				}
-				rpc.Respond(&resp, nil)
+			{
+				var sel5 int
+				var sel5v1 RPC
+				dst.Select(theRealWorld(),
+					dst.OnRecv(rpcCh, func(v RPC, _ bool) { sel5 = 1; sel5v1 = v }),
+					dst.OnRecv(shutdownCh, func(_ struct{}, _ bool) { sel5 = 2 }),
+				)
+				switch sel5 {
+				case 1:
+					rpc := sel5v1
+					// Verify the command
+					req := rpc.Command.(*AppendEntriesRequest)
+					if !reflect.DeepEqual(req, &args) {
+						t.Errorf("command mismatch: %#v %#v", *req, args)
+						return
+					}
+					rpc.Respond(&resp, nil)
 
-			case <-shutdownCh:
-				return
+				case 2:
+					return
+				default:
+					panic("dstmigrate: no select case ran")
+				}
 			}
 		}
-	}()
+	})
 
 	// Transport 2 makes outbound request
 	trans2, err := makeTransport(t, true, string(trans1.LocalAddr()))
@@ -398,7 +454,8 @@ func TestNetworkTransport_AppendEntriesPipeline_CloseStreams(t *testing.T) {
 			// On the last one, close the streams on the transport one.
 			if cancelStreams && i == 10 {
 				trans1.CloseStreams()
-				time.Sleep(10 * time.Millisecond)
+				theRealWorld().Sleep(10 * time.Millisecond)
+
 			}
 
 			out := new(AppendEntriesResponse)
@@ -411,19 +468,30 @@ func TestNetworkTransport_AppendEntriesPipeline_CloseStreams(t *testing.T) {
 		respCh := pipeline.Consumer()
 	OUTER:
 		for i := 0; i < 100; i++ {
-			select {
-			case ready := <-respCh:
-				if err := ready.Error(); err != nil {
-					futureErr = err
-					break OUTER
-				}
+			{
+				var sel6 int
+				var sel6v1 AppendFuture
+				dst.Select(theRealWorld(),
+					dst.OnRecv(respCh, func(v AppendFuture, _ bool) { sel6 = 1; sel6v1 = v }),
+					dst.OnRecv(theRealWorld().After(200*time.Millisecond), func(_ time.Time, _ bool) { sel6 = 2 }),
+				)
+				switch sel6 {
+				case 1:
+					ready := sel6v1
+					if err := ready.Error(); err != nil {
+						futureErr = err
+						break OUTER
+					}
 
-				// Verify the response
-				if !reflect.DeepEqual(&resp, ready.Response()) {
-					t.Fatalf("command mismatch: %#v %#v %v", &resp, ready.Response(), ready.Error())
+					// Verify the response
+					if !reflect.DeepEqual(&resp, ready.Response()) {
+						t.Fatalf("command mismatch: %#v %#v %v", &resp, ready.Response(), ready.Error())
+					}
+				case 2:
+					t.Fatalf("timeout when cancel streams is %v", cancelStreams)
+				default:
+					panic("dstmigrate: no select case ran")
 				}
-			case <-time.After(200 * time.Millisecond):
-				t.Fatalf("timeout when cancel streams is %v", cancelStreams)
 			}
 		}
 
@@ -470,11 +538,11 @@ func TestNetworkTransport_AppendEntriesPipeline_MaxRPCsInFlight(t *testing.T) {
 
 			// Kill the transports on the timeout to unblock. That means things that
 			// shouldn't have blocked did block.
-			go func() {
+			theRealWorld().Go(func() {
 				<-ctx.Done()
 				_ = trans2.Close()
 				_ = trans1.Close()
-			}()
+			})
 
 			// Attempt to pipeline
 			pipeline, err := trans2.AppendEntriesPipeline("id1", trans1.LocalAddr())
@@ -502,35 +570,55 @@ func TestNetworkTransport_AppendEntriesPipeline_MaxRPCsInFlight(t *testing.T) {
 			}
 
 			// Verify the next send blocks without blocking test forever
-			errCh := make(chan error, 1)
-			go func() {
+			errCh := dst.MakeChan[error](theRealWorld(), 1)
+			theRealWorld().Go(func() {
 				out := new(AppendEntriesResponse)
 				_, err := pipeline.AppendEntries(&args, out)
-				errCh <- err
-			}()
+				errCh.Send(err)
+			})
 
-			select {
-			case err := <-errCh:
-				require.NoError(t, err)
-				t.Fatalf("AppendEntries didn't block with %d in flight", max)
-			case <-time.After(50 * time.Millisecond):
-				// OK it's probably blocked or we got _really_ unlucky with scheduling!
+			{
+				var sel7 int
+				var sel7v1 error
+				dst.Select(theRealWorld(),
+					dst.OnRecv(errCh, func(v error, _ bool) { sel7 = 1; sel7v1 = v }),
+					dst.OnRecv(theRealWorld().After(50*time.Millisecond), func(_ time.Time, _ bool) { sel7 = 2 }),
+				)
+				switch sel7 {
+				case 1:
+					err := sel7v1
+					require.NoError(t, err)
+					t.Fatalf("AppendEntries didn't block with %d in flight", max)
+				case 2:
+					// OK it's probably blocked or we got _really_ unlucky with scheduling!
+				default:
+					panic("dstmigrate: no select case ran")
+				}
 			}
 
 			// Verify that once we receive/respond another one can be sent.
-			rpc := <-trans1.Consumer()
+			rpc, _ := trans1.Consumer().Recv()
 			rpc.Respond(resp, nil)
 
 			// We also need to consume the response from the pipeline in case chan is
 			// unbuffered (inflight is 2 or 1)
-			<-pipeline.Consumer()
+			pipeline.Consumer().Recv()
 
 			// The last append should unblock once the response is received.
-			select {
-			case <-errCh:
-				// OK
-			case <-time.After(50 * time.Millisecond):
-				t.Fatalf("last append didn't unblock")
+			{
+				var sel8 int
+				dst.Select(theRealWorld(),
+					dst.OnRecv(errCh, func(_ error, _ bool) { sel8 = 1 }),
+					dst.OnRecv(theRealWorld().After(50*time.Millisecond), func(_ time.Time, _ bool) { sel8 = 2 }),
+				)
+				switch sel8 {
+				case 1:
+					// OK
+				case 2:
+					t.Fatalf("last append didn't unblock")
+				default:
+					panic("dstmigrate: no select case ran")
+				}
 			}
 		})
 	}
@@ -560,23 +648,34 @@ func TestNetworkTransport_RequestVote(t *testing.T) {
 		}
 
 		// Listen for a request
-		go func() {
-			select {
-			case rpc := <-rpcCh:
-				// Verify the command
-				req := rpc.Command.(*RequestVoteRequest)
-				if !reflect.DeepEqual(req, &args) {
-					t.Errorf("command mismatch: %#v %#v", *req, args)
+		theRealWorld().Go(func() {
+			{
+				var sel9 int
+				var sel9v1 RPC
+				dst.Select(theRealWorld(),
+					dst.OnRecv(rpcCh, func(v RPC, _ bool) { sel9 = 1; sel9v1 = v }),
+					dst.OnRecv(theRealWorld().After(200*time.Millisecond), func(_ time.Time, _ bool) { sel9 = 2 }),
+				)
+				switch sel9 {
+				case 1:
+					rpc := sel9v1
+					// Verify the command
+					req := rpc.Command.(*RequestVoteRequest)
+					if !reflect.DeepEqual(req, &args) {
+						t.Errorf("command mismatch: %#v %#v", *req, args)
+						return
+					}
+
+					rpc.Respond(&resp, nil)
+
+				case 2:
+					t.Errorf("timeout")
 					return
+				default:
+					panic("dstmigrate: no select case ran")
 				}
-
-				rpc.Respond(&resp, nil)
-
-			case <-time.After(200 * time.Millisecond):
-				t.Errorf("timeout")
-				return
 			}
-		}()
+		})
 
 		// Transport 2 makes outbound request
 		trans2, err := makeTransport(t, useAddrProvider, string(trans1.LocalAddr()))
@@ -623,32 +722,43 @@ func TestNetworkTransport_InstallSnapshot(t *testing.T) {
 		}
 
 		// Listen for a request
-		go func() {
-			select {
-			case rpc := <-rpcCh:
-				// Verify the command
-				req := rpc.Command.(*InstallSnapshotRequest)
-				if !reflect.DeepEqual(req, &args) {
-					t.Errorf("command mismatch: %#v %#v", *req, args)
-					return
+		theRealWorld().Go(func() {
+			{
+				var sel10 int
+				var sel10v1 RPC
+				dst.Select(theRealWorld(),
+					dst.OnRecv(rpcCh, func(v RPC, _ bool) { sel10 = 1; sel10v1 = v }),
+					dst.OnRecv(theRealWorld().After(200*time.Millisecond), func(_ time.Time, _ bool) { sel10 = 2 }),
+				)
+				switch sel10 {
+				case 1:
+					rpc := sel10v1
+					// Verify the command
+					req := rpc.Command.(*InstallSnapshotRequest)
+					if !reflect.DeepEqual(req, &args) {
+						t.Errorf("command mismatch: %#v %#v", *req, args)
+						return
+					}
+
+					// Try to read the bytes
+					buf := make([]byte, 10)
+					_, _ = rpc.Reader.Read(buf)
+
+					// Compare
+					if !bytes.Equal(buf, []byte("0123456789")) {
+						t.Errorf("bad buf %v", buf)
+						return
+					}
+
+					rpc.Respond(&resp, nil)
+
+				case 2:
+					t.Errorf("timeout")
+				default:
+					panic("dstmigrate: no select case ran")
 				}
-
-				// Try to read the bytes
-				buf := make([]byte, 10)
-				_, _ = rpc.Reader.Read(buf)
-
-				// Compare
-				if !bytes.Equal(buf, []byte("0123456789")) {
-					t.Errorf("bad buf %v", buf)
-					return
-				}
-
-				rpc.Respond(&resp, nil)
-
-			case <-time.After(200 * time.Millisecond):
-				t.Errorf("timeout")
 			}
-		}()
+		})
 
 		// Transport 2 makes outbound request
 		trans2, err := makeTransport(t, useAddrProvider, string(trans1.LocalAddr()))
@@ -741,26 +851,37 @@ func TestNetworkTransport_PooledConn(t *testing.T) {
 	// errCh is used to report errors from any of the goroutines
 	// created in this test.
 	// It is buffered as to not block.
-	errCh := make(chan error, 100)
+	errCh := dst.MakeChan[error](theRealWorld(), 100)
 
 	// Listen for a request
-	go func() {
+	theRealWorld().Go(func() {
 		for {
-			select {
-			case rpc := <-rpcCh:
-				// Verify the command
-				req := rpc.Command.(*AppendEntriesRequest)
-				if !reflect.DeepEqual(req, &args) {
-					errCh <- fmt.Errorf("command mismatch: %#v %#v", *req, args)
-					return
-				}
-				rpc.Respond(&resp, nil)
+			{
+				var sel11 int
+				var sel11v1 RPC
+				dst.Select(theRealWorld(),
+					dst.OnRecv(rpcCh, func(v RPC, _ bool) { sel11 = 1; sel11v1 = v }),
+					dst.OnRecv(theRealWorld().After(200*time.Millisecond), func(_ time.Time, _ bool) { sel11 = 2 }),
+				)
+				switch sel11 {
+				case 1:
+					rpc := sel11v1
+					// Verify the command
+					req := rpc.Command.(*AppendEntriesRequest)
+					if !reflect.DeepEqual(req, &args) {
+						errCh.Send(fmt.Errorf("command mismatch: %#v %#v", *req, args))
+						return
+					}
+					rpc.Respond(&resp, nil)
 
-			case <-time.After(200 * time.Millisecond):
-				return
+				case 2:
+					return
+				default:
+					panic("dstmigrate: no select case ran")
+				}
 			}
 		}
-	}()
+	})
 
 	// Transport 2 makes outbound request, 3 conn pool
 	trans2, err := NewTCPTransportWithLogger("localhost:0", nil, 3, time.Second, newTestLogger(t))
@@ -770,34 +891,35 @@ func TestNetworkTransport_PooledConn(t *testing.T) {
 	defer func() { _ = trans2.Close() }()
 
 	// Create wait group
-	wg := &sync.WaitGroup{}
+	wg := &dst.WaitGroup{}
 
 	// Try to do parallel appends, should stress the conn pool
 	for i := 0; i < 5; i++ {
 		wg.Add(1)
 
-		go func() {
+		theRealWorld().Go(func() {
 			defer wg.Done()
 			var out AppendEntriesResponse
 			if err := trans2.AppendEntries("id1", trans1.LocalAddr(), &args, &out); err != nil {
-				errCh <- err
+				errCh.Send(err)
 				return
 			}
 
 			// Verify the response
 			if !reflect.DeepEqual(resp, out) {
-				errCh <- fmt.Errorf("command mismatch: %#v %#v", resp, out)
+				errCh.Send(fmt.Errorf("command mismatch: %#v %#v", resp, out))
 				return
 			}
-		}()
+		})
+
 	}
 
 	// Wait for the routines to finish
 	wg.Wait()
 
 	// Check if we received any errors from the above goroutines.
-	if len(errCh) > 0 {
-		t.Fatal(<-errCh)
+	if errCh.Len() > 0 {
+		t.Fatal(dstRecv(errCh))
 	}
 
 	// Check the conn pool size
@@ -875,23 +997,34 @@ func TestNetworkTransport_ListenBackoff(t *testing.T) {
 		Level:  hclog.DefaultLevel,
 	})
 	transport := NetworkTransport{
+		w:          theRealWorld(),
 		logger:     countingLogger,
 		stream:     testCountingStreamLayer{&numAccepts},
-		shutdownCh: make(chan struct{}),
+		shutdownCh: dst.MakeChan[struct{}](theRealWorld(), 0),
 	}
 
-	go transport.listen()
+	theRealWorld().Go(func() { transport.listen() })
+	theRealWorld().Sleep(testTime)
 
 	// sleep (+yield) for testTime seconds before asking the accept loop to shut down
-	time.Sleep(testTime)
+
 	_ = transport.Close()
 
 	// Verify that the method exited (but without block this test)
 	// maxDelay == 1s, so we will give the routine 1.25s to loop around and shut down.
-	select {
-	case <-transport.shutdownCh:
-	case <-time.After(1250 * time.Millisecond):
-		t.Error("timed out waiting for NetworkTransport to shut down")
+	{
+		var sel12 int
+		dst.Select(theRealWorld(),
+			dst.OnRecv(transport.shutdownCh, func(_ struct{}, _ bool) { sel12 = 1 }),
+			dst.OnRecv(theRealWorld().After(1250*time.Millisecond), func(_ time.Time, _ bool) { sel12 = 2 }),
+		)
+		switch sel12 {
+		case 1:
+		case 2:
+			t.Error("timed out waiting for NetworkTransport to shut down")
+		default:
+			panic("dstmigrate: no select case ran")
+		}
 	}
 	require.True(t, transport.shutdown)
 

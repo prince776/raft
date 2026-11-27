@@ -4,7 +4,6 @@
 package raft
 
 import (
-	"github.com/prince776/go-dst-kit/dst"
 	"bufio"
 	"context"
 	"errors"
@@ -12,8 +11,9 @@ import (
 	"io"
 	"net"
 	"os"
-	"sync"
 	"time"
+
+	"github.com/prince776/go-dst-kit/dst"
 
 	"github.com/hashicorp/go-hclog"
 	"github.com/hashicorp/go-metrics"
@@ -81,31 +81,31 @@ var (
 // is not known if there is an error.
 type NetworkTransport struct {
 	connPool     map[ServerAddress][]*netConn
-	connPoolLock sync.Mutex
+	connPoolLock dst.Mutex
 
-	consumeCh chan RPC
+	consumeCh dst.Chan[RPC]
 
 	heartbeatFn     func(RPC)
-	heartbeatFnLock sync.Mutex
+	heartbeatFnLock dst.Mutex
 
 	logger hclog.Logger
 
 	maxPool     int
 	maxInFlight int
 
-	serverAddressLock     sync.RWMutex
+	serverAddressLock     dst.RWMutex
 	serverAddressProvider ServerAddressProvider
 
 	shutdown     bool
-	shutdownCh   chan struct{}
-	shutdownLock sync.Mutex
+	shutdownCh   dst.Chan[struct{}]
+	shutdownLock dst.Mutex
 
 	stream StreamLayer
 
 	// streamCtx is used to cancel existing connection handlers.
 	streamCtx     context.Context
 	streamCancel  context.CancelFunc
-	streamCtxLock sync.RWMutex
+	streamCtxLock dst.RWMutex
 
 	timeout      time.Duration
 	TimeoutScale int
@@ -205,12 +205,12 @@ type netPipeline struct {
 	conn  *netConn
 	trans *NetworkTransport
 
-	doneCh       chan AppendFuture
-	inprogressCh chan *appendFuture
+	doneCh       dst.Chan[AppendFuture]
+	inprogressCh dst.Chan[*appendFuture]
 
 	shutdown     bool
-	shutdownCh   chan struct{}
-	shutdownLock sync.Mutex
+	shutdownCh   dst.Chan[struct{}]
+	shutdownLock dst.Mutex
 }
 
 // NewNetworkTransportWithConfig creates a new network transport with the given config struct
@@ -229,13 +229,18 @@ func NewNetworkTransportWithConfig(
 		// Default zero value
 		maxInFlight = DefaultMaxRPCsInFlight
 	}
+	w := config.World
+	if w == nil {
+		w = theRealWorld()
+	}
 	trans := &NetworkTransport{
+		w:                       w,
 		connPool:                make(map[ServerAddress][]*netConn),
-		consumeCh:               make(chan RPC),
+		consumeCh:               dst.MakeChan[RPC](w, 0),
 		logger:                  config.Logger,
 		maxPool:                 config.MaxPool,
 		maxInFlight:             maxInFlight,
-		shutdownCh:              make(chan struct{}),
+		shutdownCh:              dst.MakeChan[struct{}](w, 0),
 		stream:                  config.Stream,
 		timeout:                 config.Timeout,
 		TimeoutScale:            DefaultTimeoutScale,
@@ -245,7 +250,7 @@ func NewNetworkTransportWithConfig(
 
 	// Create the connection context and then start our listener.
 	trans.setupStreamContext()
-	go trans.listen()
+	w.Go(func() { trans.listen() })
 
 	return trans
 }
@@ -341,7 +346,7 @@ func (n *NetworkTransport) Close() error {
 	defer n.shutdownLock.Unlock()
 
 	if !n.shutdown {
-		close(n.shutdownCh)
+		n.shutdownCh.Close()
 		_ = n.stream.Close()
 		n.shutdown = true
 	}
@@ -349,7 +354,7 @@ func (n *NetworkTransport) Close() error {
 }
 
 // Consumer implements the Transport interface.
-func (n *NetworkTransport) Consumer() <-chan RPC {
+func (n *NetworkTransport) Consumer() dst.Chan[RPC] {
 	return n.consumeCh
 }
 
@@ -360,11 +365,20 @@ func (n *NetworkTransport) LocalAddr() ServerAddress {
 
 // IsShutdown is used to check if the transport is shutdown.
 func (n *NetworkTransport) IsShutdown() bool {
-	select {
-	case <-n.shutdownCh:
-		return true
-	default:
-		return false
+	{
+		var sel1 int
+		dst.Select(n.w,
+			dst.OnRecv(n.shutdownCh, func(_ struct{}, _ bool) { sel1 = 1 }),
+			dst.Default(func() { sel1 = 2 }),
+		)
+		switch sel1 {
+		case 1:
+			return true
+		case 2:
+			return false
+		default:
+			panic("dstmigrate: no select case ran")
+		}
 	}
 }
 
@@ -493,7 +507,7 @@ func (n *NetworkTransport) genericRPC(id ServerID, target ServerAddress, rpcType
 
 	// Set a deadline
 	if n.timeout > 0 {
-		_ = conn.conn.SetDeadline(time.Now().Add(n.timeout))
+		_ = conn.conn.SetDeadline(n.w.Now().Add(n.timeout))
 	}
 
 	// Send the RPC
@@ -524,7 +538,7 @@ func (n *NetworkTransport) InstallSnapshot(id ServerID, target ServerAddress, ar
 		if timeout < n.timeout {
 			timeout = n.timeout
 		}
-		_ = conn.conn.SetDeadline(time.Now().Add(timeout))
+		_ = conn.conn.SetDeadline(n.w.Now().Add(timeout))
 	}
 
 	// Send the RPC
@@ -587,11 +601,20 @@ func (n *NetworkTransport) listen() {
 				n.logger.Error("failed to accept connection", "error", err)
 			}
 
-			select {
-			case <-n.shutdownCh:
-				return
-			case <-time.After(loopDelay):
-				continue
+			{
+				var sel2 int
+				dst.Select(n.w,
+					dst.OnRecv(n.shutdownCh, func(_ struct{}, _ bool) { sel2 = 1 }),
+					dst.OnRecv(n.w.After(loopDelay), func(_ time.Time, _ bool) { sel2 = 2 }),
+				)
+				switch sel2 {
+				case 1:
+					return
+				case 2:
+					continue
+				default:
+					panic("dstmigrate: no select case ran")
+				}
 			}
 		}
 		// No error, reset loop delay
@@ -600,7 +623,10 @@ func (n *NetworkTransport) listen() {
 		n.logger.Debug("accepted connection", "local-address", n.LocalAddr(), "remote-address", conn.RemoteAddr().String())
 
 		// Handle the connection in dedicated routine
-		go n.handleConn(n.getStreamContext(), conn)
+		{
+			goArg1 := n.getStreamContext()
+			n.w.Go(func() { n.handleConn(goArg1, conn) })
+		}
 	}
 }
 
@@ -618,11 +644,20 @@ func (n *NetworkTransport) handleConn(connCtx context.Context, conn net.Conn) {
 	enc := codec.NewEncoder(w, mp)
 
 	for {
-		select {
-		case <-connCtx.Done():
-			n.logger.Debug("stream layer is closed")
-			return
-		default:
+		{
+			var sel3 int
+			dst.Select(n.w,
+				dst.OnDone(connCtx, func() { sel3 = 1 }),
+				dst.Default(func() { sel3 = 2 }),
+			)
+			switch sel3 {
+			case 1:
+				n.logger.Debug("stream layer is closed")
+				return
+			case 2:
+			default:
+				panic("dstmigrate: no select case ran")
+			}
 		}
 
 		if err := n.handleCommand(r, dec, enc); err != nil {
@@ -640,7 +675,7 @@ func (n *NetworkTransport) handleConn(connCtx context.Context, conn net.Conn) {
 
 // handleCommand is used to decode and dispatch a single command.
 func (n *NetworkTransport) handleCommand(r *bufio.Reader, dec *codec.Decoder, enc *codec.Encoder) error {
-	getTypeStart := time.Now()
+	getTypeStart := n.w.Now()
 
 	// Get the rpc type
 	rpcType, err := r.ReadByte()
@@ -651,10 +686,10 @@ func (n *NetworkTransport) handleCommand(r *bufio.Reader, dec *codec.Decoder, en
 	// measuring the time to get the first byte separately because the heartbeat conn will hang out here
 	// for a good while waiting for a heartbeat whereas the append entries/rpc conn should not.
 	metrics.MeasureSince([]string{"raft", "net", "getRPCType"}, getTypeStart)
-	decodeStart := time.Now()
+	decodeStart := n.w.Now()
 
 	// Create the RPC object
-	respCh := make(chan RPCResponse, 1)
+	respCh := dst.MakeChan[RPCResponse](n.w, 1)
 	rpc := RPC{
 		RespChan: respCh,
 	}
@@ -722,7 +757,7 @@ func (n *NetworkTransport) handleCommand(r *bufio.Reader, dec *codec.Decoder, en
 
 	metrics.MeasureSinceWithLabels([]string{"raft", "net", "rpcDecode"}, decodeStart, labels)
 
-	processStart := time.Now()
+	processStart := n.w.Now()
 
 	// Check for heartbeat fast-path
 	if isHeartbeat {
@@ -736,35 +771,55 @@ func (n *NetworkTransport) handleCommand(r *bufio.Reader, dec *codec.Decoder, en
 	}
 
 	// Dispatch the RPC
-	select {
-	case n.consumeCh <- rpc:
-	case <-n.shutdownCh:
-		return ErrTransportShutdown
+	{
+		var sel4 int
+		dst.Select(n.w,
+			dst.OnSend(n.consumeCh, rpc, func() { sel4 = 1 }),
+			dst.OnRecv(n.shutdownCh, func(_ struct{}, _ bool) { sel4 = 2 }),
+		)
+		switch sel4 {
+		case 1:
+		case 2:
+			return ErrTransportShutdown
+		default:
+			panic("dstmigrate: no select case ran")
+		}
 	}
 
 	// Wait for response
 RESP:
 	// we will differentiate the heartbeat fast path from normal RPCs with labels
 	metrics.MeasureSinceWithLabels([]string{"raft", "net", "rpcEnqueue"}, processStart, labels)
-	respWaitStart := time.Now()
-	select {
-	case resp := <-respCh:
-		defer metrics.MeasureSinceWithLabels([]string{"raft", "net", "rpcRespond"}, respWaitStart, labels)
-		// Send the error first
-		respErr := ""
-		if resp.Error != nil {
-			respErr = resp.Error.Error()
-		}
-		if err := enc.Encode(respErr); err != nil {
-			return err
-		}
+	respWaitStart := n.w.Now()
+	{
+		var sel5 int
+		var sel5v1 RPCResponse
+		dst.Select(n.w,
+			dst.OnRecv(respCh, func(v RPCResponse, _ bool) { sel5 = 1; sel5v1 = v }),
+			dst.OnRecv(n.shutdownCh, func(_ struct{}, _ bool) { sel5 = 2 }),
+		)
+		switch sel5 {
+		case 1:
+			resp := sel5v1
+			defer metrics.MeasureSinceWithLabels([]string{"raft", "net", "rpcRespond"}, respWaitStart, labels)
+			// Send the error first
+			respErr := ""
+			if resp.Error != nil {
+				respErr = resp.Error.Error()
+			}
+			if err := enc.Encode(respErr); err != nil {
+				return err
+			}
 
-		// Send the response
-		if err := enc.Encode(resp.Response); err != nil {
-			return err
+			// Send the response
+			if err := enc.Encode(resp.Response); err != nil {
+				return err
+			}
+		case 2:
+			return ErrTransportShutdown
+		default:
+			panic("dstmigrate: no select case ran")
 		}
-	case <-n.shutdownCh:
-		return ErrTransportShutdown
 	}
 	return nil
 }
@@ -831,11 +886,11 @@ func newNetPipeline(trans *NetworkTransport, conn *netConn, maxInFlight int) *ne
 		// soon as it's waiting on the first request. So a zero-buffered channel
 		// still allows 1 request to be sent even while decode is still waiting for
 		// a response from the previous one. i.e. two are inflight at the same time.
-		inprogressCh: make(chan *appendFuture, maxInFlight-2),
-		doneCh:       make(chan AppendFuture, maxInFlight-2),
-		shutdownCh:   make(chan struct{}),
+		inprogressCh: dst.MakeChan[*appendFuture](trans.w, maxInFlight-2),
+		doneCh:       dst.MakeChan[AppendFuture](trans.w, maxInFlight-2),
+		shutdownCh:   dst.MakeChan[struct{}](trans.w, 0),
 	}
-	go n.decodeResponses()
+	trans.w.Go(func() { n.decodeResponses() })
 	return n
 }
 
@@ -844,21 +899,41 @@ func newNetPipeline(trans *NetworkTransport, conn *netConn, maxInFlight int) *ne
 func (n *netPipeline) decodeResponses() {
 	timeout := n.trans.timeout
 	for {
-		select {
-		case future := <-n.inprogressCh:
-			if timeout > 0 {
-				_ = n.conn.conn.SetReadDeadline(time.Now().Add(timeout))
-			}
+		{
+			var sel6 int
+			var sel6v1 *appendFuture
+			dst.Select(n.trans.w,
+				dst.OnRecv(n.inprogressCh, func(v *appendFuture, _ bool) { sel6 = 1; sel6v1 = v }),
+				dst.OnRecv(n.shutdownCh, func(_ struct{}, _ bool) { sel6 = 2 }),
+			)
+			switch sel6 {
+			case 1:
+				future := sel6v1
+				if timeout > 0 {
+					_ = n.conn.conn.SetReadDeadline(n.trans.w.Now().Add(timeout))
+				}
 
-			_, err := decodeResponse(n.conn, future.resp)
-			future.respond(err)
-			select {
-			case n.doneCh <- future:
-			case <-n.shutdownCh:
+				_, err := decodeResponse(n.conn, future.resp)
+				future.respond(err)
+				{
+					var sel7 int
+					dst.Select(n.trans.w,
+						dst.OnSend[AppendFuture](n.doneCh, future, func() { sel7 = 1 }),
+						dst.OnRecv(n.shutdownCh, func(_ struct{}, _ bool) { sel7 = 2 }),
+					)
+					switch sel7 {
+					case 1:
+					case 2:
+						return
+					default:
+						panic("dstmigrate: no select case ran")
+					}
+				}
+			case 2:
 				return
+			default:
+				panic("dstmigrate: no select case ran")
 			}
-		case <-n.shutdownCh:
-			return
 		}
 	}
 }
@@ -867,7 +942,7 @@ func (n *netPipeline) decodeResponses() {
 func (n *netPipeline) AppendEntries(args *AppendEntriesRequest, resp *AppendEntriesResponse) (AppendFuture, error) {
 	// Create a new future
 	future := &appendFuture{
-		start: time.Now(),
+		start: n.trans.w.Now(),
 		args:  args,
 		resp:  resp,
 	}
@@ -875,7 +950,7 @@ func (n *netPipeline) AppendEntries(args *AppendEntriesRequest, resp *AppendEntr
 
 	// Add a send timeout
 	if timeout := n.trans.timeout; timeout > 0 {
-		_ = n.conn.conn.SetWriteDeadline(time.Now().Add(timeout))
+		_ = n.conn.conn.SetWriteDeadline(n.trans.w.Now().Add(timeout))
 	}
 
 	// Send the RPC
@@ -885,16 +960,25 @@ func (n *netPipeline) AppendEntries(args *AppendEntriesRequest, resp *AppendEntr
 
 	// Hand-off for decoding, this can also cause back-pressure
 	// to prevent too many inflight requests
-	select {
-	case n.inprogressCh <- future:
-		return future, nil
-	case <-n.shutdownCh:
-		return nil, ErrPipelineShutdown
+	{
+		var sel8 int
+		dst.Select(n.trans.w,
+			dst.OnSend(n.inprogressCh, future, func() { sel8 = 1 }),
+			dst.OnRecv(n.shutdownCh, func(_ struct{}, _ bool) { sel8 = 2 }),
+		)
+		switch sel8 {
+		case 1:
+			return future, nil
+		case 2:
+			return nil, ErrPipelineShutdown
+		default:
+			panic("dstmigrate: no select case ran")
+		}
 	}
 }
 
 // Consumer returns a channel that can be used to consume complete futures.
-func (n *netPipeline) Consumer() <-chan AppendFuture {
+func (n *netPipeline) Consumer() dst.Chan[AppendFuture] {
 	return n.doneCh
 }
 
@@ -910,6 +994,6 @@ func (n *netPipeline) Close() error {
 	_ = n.conn.Release()
 
 	n.shutdown = true
-	close(n.shutdownCh)
+	n.shutdownCh.Close()
 	return nil
 }

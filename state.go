@@ -4,9 +4,9 @@
 package raft
 
 import (
-	"github.com/prince776/go-dst-kit/dst"
-	"sync"
 	"sync/atomic"
+
+	"github.com/prince776/go-dst-kit/dst"
 )
 
 // RaftState captures the state of a Raft node: Follower, Candidate, Leader,
@@ -60,7 +60,7 @@ type raftState struct {
 	lastApplied uint64
 
 	// protects 4 next fields
-	lastLock sync.Mutex
+	lastLock dst.Mutex
 
 	// Cache the latest snapshot index/term
 	lastSnapshotIndex uint64
@@ -71,7 +71,7 @@ type raftState struct {
 	lastLogTerm  uint64
 
 	// Tracks running goroutines
-	routinesGroup sync.WaitGroup
+	routinesGroup dst.WaitGroup
 
 	// The current state
 	state RaftState
@@ -148,10 +148,11 @@ func (r *raftState) setLastApplied(index uint64) {
 // starting and incrementing, and exiting and decrementing.
 func (r *raftState) goFunc(f func()) {
 	r.routinesGroup.Add(1)
-	go func() {
+	r.w.Go(func() {
 		defer r.routinesGroup.Done()
 		f()
-	}()
+	})
+
 }
 
 func (r *raftState) waitShutdown() {

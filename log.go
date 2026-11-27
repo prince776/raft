@@ -8,6 +8,7 @@ import (
 	"time"
 
 	metrics "github.com/hashicorp/go-metrics"
+	"github.com/prince776/go-dst-kit/dst"
 )
 
 // LogType describes various types of log entries.
@@ -174,19 +175,28 @@ func oldestLog(s LogStore) (Log, error) {
 	return l, nil
 }
 
-func emitLogStoreMetrics(s LogStore, prefix []string, interval time.Duration, stopCh <-chan struct{}) {
+func emitLogStoreMetrics(w *dst.World, s LogStore, prefix []string, interval time.Duration, stopCh dst.Chan[struct{}]) {
 	for {
-		select {
-		case <-time.After(interval):
-			// In error case emit 0 as the age
-			ageMs := float32(0.0)
-			l, err := oldestLog(s)
-			if err == nil && !l.AppendedAt.IsZero() {
-				ageMs = float32(time.Since(l.AppendedAt).Milliseconds())
+		{
+			var sel1 int
+			dst.Select(w,
+				dst.OnRecv(w.After(interval), func(_ time.Time, _ bool) { sel1 = 1 }),
+				dst.OnRecv(stopCh, func(_ struct{}, _ bool) { sel1 = 2 }),
+			)
+			switch sel1 {
+			case 1:
+				// In error case emit 0 as the age
+				ageMs := float32(0.0)
+				l, err := oldestLog(s)
+				if err == nil && !l.AppendedAt.IsZero() {
+					ageMs = float32(w.Since(l.AppendedAt).Milliseconds())
+				}
+				metrics.SetGauge(append(prefix, "oldestLogAge"), ageMs)
+			case 2:
+				return
+			default:
+				panic("dstmigrate: no select case ran")
 			}
-			metrics.SetGauge(append(prefix, "oldestLogAge"), ageMs)
-		case <-stopCh:
-			return
 		}
 	}
 }

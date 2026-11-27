@@ -7,7 +7,8 @@ import (
 	"bytes"
 	"fmt"
 	"io"
-	"sync"
+
+	"github.com/prince776/go-dst-kit/dst"
 )
 
 // InmemSnapshotStore implements the SnapshotStore interface and
@@ -15,7 +16,9 @@ import (
 type InmemSnapshotStore struct {
 	latest      *InmemSnapshotSink
 	hasSnapshot bool
-	sync.RWMutex
+	dst.RWMutex
+
+	w *dst.World // nil: the real World
 }
 
 // InmemSnapshotSink implements SnapshotSink in memory
@@ -41,7 +44,7 @@ func (m *InmemSnapshotStore) Create(version SnapshotVersion, index, term uint64,
 		return nil, fmt.Errorf("unsupported snapshot version %d", version)
 	}
 
-	name := snapshotName(term, index)
+	name := snapshotName(m.world(), term, index)
 
 	m.Lock()
 	defer m.Unlock()
@@ -110,4 +113,11 @@ func (s *InmemSnapshotSink) ID() string {
 // Cancel returns successfully with a nil error
 func (s *InmemSnapshotSink) Cancel() error {
 	return nil
+}
+
+func (m *InmemSnapshotStore) world() *dst.World {
+	if m.w == nil {
+		return theRealWorld()
+	}
+	return m.w
 }

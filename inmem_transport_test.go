@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/prince776/go-dst-kit/dst"
 	"github.com/stretchr/testify/require"
 )
 
@@ -30,13 +31,15 @@ func TestInmemTransportWriteTimeout(t *testing.T) {
 	// without having to contrive to fill up the buffer first.
 	timeout := 10 * time.Millisecond
 	t1 := &InmemTransport{
-		consumerCh: make(chan RPC),
+		w:          theRealWorld(),
+		consumerCh: dst.MakeChan[RPC](theRealWorld(), 0),
 		localAddr:  NewInmemAddr(),
 		peers:      make(map[ServerAddress]*InmemTransport),
 		timeout:    timeout,
 	}
 	t2 := &InmemTransport{
-		consumerCh: make(chan RPC),
+		w:          theRealWorld(),
+		consumerCh: dst.MakeChan[RPC](theRealWorld(), 0),
 		localAddr:  NewInmemAddr(),
 		peers:      make(map[ServerAddress]*InmemTransport),
 		timeout:    timeout,
@@ -44,24 +47,35 @@ func TestInmemTransportWriteTimeout(t *testing.T) {
 	a2 := t2.LocalAddr()
 	t1.Connect(a2, t2)
 
-	stop := make(chan struct{})
-	stopped := make(chan struct{})
-	go func() {
-		defer close(stopped)
+	stop := dst.MakeChan[struct{}](theRealWorld(), 0)
+	stopped := dst.MakeChan[struct{}](theRealWorld(), 0)
+	theRealWorld().Go(func() {
+		defer stopped.Close()
 		var i uint64
 		for {
-			select {
-			case <-stop:
-				return
-			case rpc := <-t2.Consumer():
-				i++
-				rpc.Respond(&AppendEntriesResponse{
-					Success: true,
-					LastLog: i,
-				}, nil)
+			{
+				var sel1 int
+				var sel1v2 RPC
+				dst.Select(theRealWorld(),
+					dst.OnRecv(stop, func(_ struct{}, _ bool) { sel1 = 1 }),
+					dst.OnRecv(t2.Consumer(), func(v RPC, _ bool) { sel1 = 2; sel1v2 = v }),
+				)
+				switch sel1 {
+				case 1:
+					return
+				case 2:
+					rpc := sel1v2
+					i++
+					rpc.Respond(&AppendEntriesResponse{
+						Success: true,
+						LastLog: i,
+					}, nil)
+				default:
+					panic("dstmigrate: no select case ran")
+				}
 			}
 		}
-	}()
+	})
 
 	var resp AppendEntriesResponse
 	// Sanity check that sending is working before stopping the
@@ -70,11 +84,20 @@ func TestInmemTransportWriteTimeout(t *testing.T) {
 	NoErr(err, t)
 	require.True(t, resp.LastLog == 1)
 
-	close(stop)
-	select {
-	case <-stopped:
-	case <-time.After(time.Second):
-		t.Fatalf("timed out waiting for responder to stop")
+	stop.Close()
+	{
+		var sel2 int
+		dst.Select(theRealWorld(),
+			dst.OnRecv(stopped, func(_ struct{}, _ bool) { sel2 = 1 }),
+			dst.OnRecv(theRealWorld().After(time.Second), func(_ time.Time, _ bool) { sel2 = 2 }),
+		)
+		switch sel2 {
+		case 1:
+		case 2:
+			t.Fatalf("timed out waiting for responder to stop")
+		default:
+			panic("dstmigrate: no select case ran")
+		}
 	}
 
 	err = t1.AppendEntries("server1", a2, &AppendEntriesRequest{}, &resp)

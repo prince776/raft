@@ -4,16 +4,16 @@
 package raft
 
 import (
-	"github.com/prince776/go-dst-kit/dst"
 	"bytes"
 	"context"
 	"fmt"
 	"io"
 	"os"
 	"reflect"
-	"sync"
 	"testing"
 	"time"
+
+	"github.com/prince776/go-dst-kit/dst"
 
 	"github.com/hashicorp/go-hclog"
 	"github.com/hashicorp/go-msgpack/v2/codec"
@@ -37,7 +37,7 @@ func inmemConfig(t testing.TB) *Config {
 //
 // NOTE: This is exposed for middleware testing purposes and is not a stable API
 type MockFSM struct {
-	sync.Mutex
+	dst.Mutex
 	logs           [][]byte
 	configurations []Configuration
 }
@@ -229,15 +229,15 @@ type cluster struct {
 	trans            []LoopbackTransport
 	rafts            []*Raft
 	t                *testing.T
-	observationCh    chan Observation
+	observationCh    dst.Chan[Observation]
 	conf             *Config
 	propagateTimeout time.Duration
 	longstopTimeout  time.Duration
 	logger           hclog.Logger
 	startTime        time.Time
 
-	failedLock sync.Mutex
-	failedCh   chan struct{}
+	failedLock dst.Mutex
+	failedCh   dst.Chan[struct{}]
 	failed     bool
 
 	w *dst.World
@@ -269,7 +269,7 @@ func (c *cluster) notifyFailed() {
 	defer c.failedLock.Unlock()
 	if !c.failed {
 		c.failed = true
-		close(c.failedCh)
+		c.failedCh.Close()
 	}
 }
 
@@ -304,11 +304,12 @@ func (c *cluster) Close() {
 	}
 
 	// Wait for shutdown
-	limit := time.AfterFunc(c.longstopTimeout, func() {
+	limit := c.w.AfterFunc(c.longstopTimeout, func() {
+		panic("timed out waiting for shutdown")
 		// We can't FailNowf here, and c.Failf won't do anything if we
 		// hang, so panic.
-		panic("timed out waiting for shutdown")
 	})
+
 	defer limit.Stop()
 
 	for _, f := range futures {
@@ -326,21 +327,34 @@ func (c *cluster) Close() {
 // or a timeout occurs. It is possible to set a filter to look for specific
 // observations. Setting timeout to 0 means that it will wait forever until a
 // non-filtered observation is made.
-func (c *cluster) WaitEventChan(ctx context.Context, filter FilterFn) <-chan struct{} {
-	ch := make(chan struct{})
-	go func() {
-		defer close(ch)
+func (c *cluster) WaitEventChan(ctx context.Context, filter FilterFn) dst.Chan[struct{}] {
+	ch := dst.MakeChan[struct{}](c.w, 0)
+	c.w.Go(func() {
+		defer ch.Close()
 		for {
-			select {
-			case <-ctx.Done():
-				return
-			case o, ok := <-c.observationCh:
-				if !ok || filter == nil || filter(&o) {
+			{
+				var sel1 int
+				var sel1v2 Observation
+				var sel1ok2 bool
+				dst.Select(c.w,
+					dst.OnDone(ctx, func() { sel1 = 1 }),
+					dst.OnRecv(c.observationCh, func(v Observation, ok bool) { sel1 = 2; sel1v2, sel1ok2 = v, ok }),
+				)
+				switch sel1 {
+				case 1:
 					return
+				case 2:
+					o, ok := sel1v2, sel1ok2
+					if !ok || filter == nil || filter(&o) {
+						return
+					}
+				default:
+					panic("dstmigrate: no select case ran")
 				}
 			}
 		}
-	}()
+	})
+
 	return ch
 }
 
@@ -352,41 +366,60 @@ func (c *cluster) WaitEvent(filter FilterFn, timeout time.Duration) {
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 	eventCh := c.WaitEventChan(ctx, filter)
-	select {
-	case <-c.failedCh:
-		c.t.FailNow()
-	case <-eventCh:
+	{
+		var sel2 int
+		dst.Select(c.w,
+			dst.OnRecv(c.failedCh, func(_ struct{}, _ bool) { sel2 = 1 }),
+			dst.OnRecv(eventCh, func(_ struct{}, _ bool) { sel2 = 2 }),
+		)
+		switch sel2 {
+		case 1:
+			c.t.FailNow()
+		case 2:
+		default:
+			panic("dstmigrate: no select case ran")
+		}
 	}
 }
 
 // WaitForReplication blocks until every FSM in the cluster has the given
 // length, or the long sanity check timeout expires.
 func (c *cluster) WaitForReplication(fsmLength int) {
-	limitCh := time.After(c.longstopTimeout)
+	limitCh := c.w.After(c.longstopTimeout)
 
 CHECK:
 	for {
 		ctx, cancel := context.WithTimeout(context.Background(), c.conf.CommitTimeout)
 		defer cancel()
 		ch := c.WaitEventChan(ctx, nil)
-		select {
-		case <-c.failedCh:
-			c.t.FailNow()
+		{
+			var sel3 int
+			dst.Select(c.w,
+				dst.OnRecv(c.failedCh, func(_ struct{}, _ bool) { sel3 = 1 }),
+				dst.OnRecv(limitCh, func(_ time.Time, _ bool) { sel3 = 2 }),
+				dst.OnRecv(ch, func(_ struct{}, _ bool) { sel3 = 3 }),
+			)
+			switch sel3 {
+			case 1:
+				c.t.FailNow()
 
-		case <-limitCh:
-			c.t.Fatalf("timeout waiting for replication")
+			case 2:
+				c.t.Fatalf("timeout waiting for replication")
 
-		case <-ch:
-			for _, fsmRaw := range c.fsms {
-				fsm := getMockFSM(fsmRaw)
-				fsm.Lock()
-				num := len(fsm.logs)
-				fsm.Unlock()
-				if num != fsmLength {
-					continue CHECK
+			case 3:
+				for _, fsmRaw := range c.fsms {
+					fsm := getMockFSM(fsmRaw)
+					fsm.Lock()
+					num := len(fsm.logs)
+					fsm.Unlock()
+					if num != fsmLength {
+						continue CHECK
+					}
 				}
+				return
+			default:
+				panic("dstmigrate: no select case ran")
 			}
-			return
 		}
 	}
 }
@@ -413,7 +446,7 @@ func (c *cluster) pollState(s RaftState) ([]*Raft, uint64) {
 // settled into the given state.
 func (c *cluster) GetInState(s RaftState) []*Raft {
 	c.logger.Info("starting stability test", "raft-state", s)
-	limitCh := time.After(c.longstopTimeout)
+	limitCh := c.w.After(c.longstopTimeout)
 
 	// An election should complete after 2 * max(HeartbeatTimeout, ElectionTimeout)
 	// because of the randomised timer expiring in 1 x interval ... 2 x interval.
@@ -428,16 +461,16 @@ func (c *cluster) GetInState(s RaftState) []*Raft {
 		timeout = c.conf.ElectionTimeout
 	}
 	timeout = 2*timeout + c.conf.CommitTimeout
-	timer := time.NewTimer(timeout)
+	timer := c.w.NewTimer(timeout)
 	defer timer.Stop()
 
 	// Wait until we have a stable instate slice. Each time we see an
 	// observation a state has changed, recheck it and if it has changed,
 	// restart the timer.
-	pollStartTime := time.Now()
+	pollStartTime := c.w.Now()
 	for {
 		_, highestTerm := c.pollState(s)
-		inStateTime := time.Now()
+		inStateTime := c.w.Now()
 
 		// Sometimes this routine is called very early on before the
 		// rafts have started up. We then timeout even though no one has
@@ -467,25 +500,39 @@ func (c *cluster) GetInState(s RaftState) []*Raft {
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
 		eventCh := c.WaitEventChan(ctx, filter)
-		select {
-		case <-c.failedCh:
-			c.t.FailNow()
+		{
+			var sel4 int
+			var sel4v4 time.Time
+			var sel4ok4 bool
+			dst.Select(c.w,
+				dst.OnRecv(c.failedCh, func(_ struct{}, _ bool) { sel4 = 1 }),
+				dst.OnRecv(limitCh, func(_ time.Time, _ bool) { sel4 = 2 }),
+				dst.OnRecv(eventCh, func(_ struct{}, _ bool) { sel4 = 3 }),
+				dst.OnRecv(timer.C, func(v time.Time, ok bool) { sel4 = 4; sel4v4, sel4ok4 = v, ok }),
+			)
+			switch sel4 {
+			case 1:
+				c.t.FailNow()
 
-		case <-limitCh:
-			c.t.Fatalf("timeout waiting for stable %s state", s)
+			case 2:
+				c.t.Fatalf("timeout waiting for stable %s state", s)
 
-		case <-eventCh:
-			c.logger.Debug("resetting stability timeout")
+			case 3:
+				c.logger.Debug("resetting stability timeout")
 
-		case t, ok := <-timer.C:
-			if !ok {
-				c.t.Fatalf("timer channel errored")
+			case 4:
+				t, ok := sel4v4, sel4ok4
+				if !ok {
+					c.t.Fatalf("timer channel errored")
+				}
+
+				inState, highestTerm := c.pollState(s)
+				c.logger.Info(fmt.Sprintf("stable state for %s reached at %s (%d nodes), highestTerm is %d, %s from start of poll, %s from cluster start. Timeout at %s, %s after stability",
+					s, inStateTime, len(inState), highestTerm, inStateTime.Sub(pollStartTime), inStateTime.Sub(c.startTime), t, t.Sub(inStateTime)))
+				return inState
+			default:
+				panic("dstmigrate: no select case ran")
 			}
-
-			inState, highestTerm := c.pollState(s)
-			c.logger.Info(fmt.Sprintf("stable state for %s reached at %s (%d nodes), highestTerm is %d, %s from start of poll, %s from cluster start. Timeout at %s, %s after stability",
-				s, inStateTime, len(inState), highestTerm, inStateTime.Sub(pollStartTime), inStateTime.Sub(c.startTime), t, t.Sub(inStateTime)))
-			return inState
 		}
 	}
 }
@@ -615,7 +662,7 @@ func (c *cluster) EnsureLeader(t *testing.T, expect ServerAddress) {
 
 // EnsureSame makes sure all the FSMs have the same contents.
 func (c *cluster) EnsureSame(t *testing.T) {
-	limit := time.Now().Add(c.longstopTimeout)
+	limit := c.w.Now().Add(c.longstopTimeout)
 	first := getMockFSM(c.fsms[0])
 
 CHECK:
@@ -629,7 +676,7 @@ CHECK:
 
 		if len(first.logs) != len(fsm.logs) {
 			fsm.Unlock()
-			if time.Now().After(limit) {
+			if c.w.Now().After(limit) {
 				t.Fatalf("FSM log length mismatch: %d %d",
 					len(first.logs), len(fsm.logs))
 			} else {
@@ -640,7 +687,7 @@ CHECK:
 		for idx := 0; idx < len(first.logs); idx++ {
 			if !bytes.Equal(first.logs[idx], fsm.logs[idx]) {
 				fsm.Unlock()
-				if time.Now().After(limit) {
+				if c.w.Now().After(limit) {
 					t.Fatalf("FSM log mismatch at index %d", idx)
 				} else {
 					goto WAIT
@@ -649,7 +696,7 @@ CHECK:
 		}
 		if len(first.configurations) != len(fsm.configurations) {
 			fsm.Unlock()
-			if time.Now().After(limit) {
+			if c.w.Now().After(limit) {
 				t.Fatalf("FSM configuration length mismatch: %d %d",
 					len(first.logs), len(fsm.logs))
 			} else {
@@ -660,7 +707,7 @@ CHECK:
 		for idx := 0; idx < len(first.configurations); idx++ {
 			if !reflect.DeepEqual(first.configurations[idx], fsm.configurations[idx]) {
 				fsm.Unlock()
-				if time.Now().After(limit) {
+				if c.w.Now().After(limit) {
 					t.Fatalf("FSM configuration mismatch at index %d: %v, %v", idx, first.configurations[idx], fsm.configurations[idx])
 				} else {
 					goto WAIT
@@ -693,7 +740,7 @@ func (c *cluster) getConfiguration(r *Raft) Configuration {
 
 // EnsureSamePeers makes sure all the rafts have the same set of peers.
 func (c *cluster) EnsureSamePeers(t *testing.T) {
-	limit := time.Now().Add(c.longstopTimeout)
+	limit := c.w.Now().Add(c.longstopTimeout)
 	peerSet := c.getConfiguration(c.rafts[0])
 
 CHECK:
@@ -704,7 +751,7 @@ CHECK:
 
 		otherSet := c.getConfiguration(raft)
 		if !reflect.DeepEqual(peerSet, otherSet) {
-			if time.Now().After(limit) {
+			if c.w.Now().After(limit) {
 				t.Fatalf("peer mismatch: %+v %+v", peerSet, otherSet)
 			} else {
 				goto WAIT
@@ -740,15 +787,17 @@ func makeCluster(t *testing.T, opts *MakeClusterOpts) (*cluster, error) {
 		opts.Conf = inmemConfig(t)
 	}
 
+	w := theRealWorld()
 	c := &cluster{
-		observationCh: make(chan Observation, 1024),
+		w:             w,
+		observationCh: dst.MakeChan[Observation](w, 1024),
 		conf:          opts.Conf,
 		// Propagation takes a maximum of 2 heartbeat timeouts (time to
 		// get a new heartbeat that would cause a commit) plus a bit.
 		propagateTimeout: opts.Conf.HeartbeatTimeout*2 + opts.Conf.CommitTimeout,
 		longstopTimeout:  5 * time.Second,
 		logger:           newTestLoggerWithPrefix(t, "cluster"),
-		failedCh:         make(chan struct{}),
+		failedCh:         dst.MakeChan[struct{}](w, 0),
 	}
 	if opts.LongstopTimeout > 0 {
 		c.longstopTimeout = opts.LongstopTimeout
@@ -805,7 +854,7 @@ func makeCluster(t *testing.T, opts *MakeClusterOpts) (*cluster, error) {
 	c.FullyConnect()
 
 	// Create all the rafts
-	c.startTime = time.Now()
+	c.startTime = w.Now()
 	for i := 0; i < opts.Peers; i++ {
 		var logs LogStore
 		logs = c.stores[i]

@@ -4,9 +4,10 @@
 package raft
 
 import (
-	"github.com/prince776/go-dst-kit/dst"
 	"math"
 	"time"
+
+	"github.com/prince776/go-dst-kit/dst"
 
 	"github.com/hashicorp/go-metrics"
 )
@@ -44,11 +45,12 @@ type saturationMetric struct {
 // newSaturationMetric creates a saturationMetric that will update the gauge
 // with the given name at the given reportInterval. keepPrev determines the
 // number of previous measurements that will be used to smooth out spikes.
-func newSaturationMetric(name []string, reportInterval time.Duration) *saturationMetric {
+func newSaturationMetric(w *dst.World, name []string, reportInterval time.Duration) *saturationMetric {
 	m := &saturationMetric{
 		reportInterval: reportInterval,
 		nowFn:          time.Now,
-		lastReport:     time.Now(),
+		w:              w,
+		lastReport:     w.Now(),
 		reportFn:       func(sat float32) { metrics.AddSample(name, sat) },
 	}
 	return m

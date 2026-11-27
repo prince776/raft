@@ -4,9 +4,10 @@
 package raft
 
 import (
-	"github.com/prince776/go-dst-kit/realworld"
 	"errors"
 	"testing"
+
+	"github.com/prince776/go-dst-kit/realworld"
 )
 
 func TestDeferFutureSuccess(t *testing.T) {
@@ -39,7 +40,7 @@ func TestDeferFutureConcurrent(t *testing.T) {
 	want := errors.New("x")
 	var f deferError
 	f.init(realworld.New(realworld.Options{}))
-	go f.respond(want)
+	theRealWorld().Go(func() { f.respond(want) })
 	if got := f.Error(); got != want {
 		t.Errorf("unexpected error result; got %#v want %#v", got, want)
 	}

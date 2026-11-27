@@ -4,11 +4,12 @@
 package raft
 
 import (
-	"github.com/prince776/go-dst-kit/dst"
 	"fmt"
 	"io"
 	"os"
 	"time"
+
+	"github.com/prince776/go-dst-kit/dst"
 
 	"github.com/hashicorp/go-hclog"
 )
@@ -213,7 +214,7 @@ type Config struct {
 	// NotifyCh is used to provide a channel that will be notified of leadership
 	// changes. Raft will block writing to this channel, so it should either be
 	// buffered or aggressively consumed.
-	NotifyCh chan<- bool
+	NotifyCh dst.Chan[bool]
 
 	// LogOutput is used as a sink for logs, unless Logger is specified.
 	// Defaults to os.Stderr.
@@ -392,4 +393,12 @@ func ValidateConfig(config *Config) error {
 		return fmt.Errorf("ElectionTimeout (%s) must be equal or greater than Heartbeat Timeout (%s)", config.ElectionTimeout, config.HeartbeatTimeout)
 	}
 	return nil
+}
+
+// worldOrReal is the config's World, or the real one.
+func (c *Config) worldOrReal() *dst.World {
+	if c.World != nil {
+		return c.World
+	}
+	return theRealWorld()
 }

@@ -6,6 +6,8 @@ package raft
 import (
 	"io"
 	"time"
+
+	"github.com/prince776/go-dst-kit/dst"
 )
 
 // RPCResponse captures both a response and a potential error.
@@ -18,12 +20,12 @@ type RPCResponse struct {
 type RPC struct {
 	Command  interface{}
 	Reader   io.Reader // Set only for InstallSnapshot
-	RespChan chan<- RPCResponse
+	RespChan dst.Chan[RPCResponse]
 }
 
 // Respond is used to respond with a response, error or both
 func (r *RPC) Respond(resp interface{}, err error) {
-	r.RespChan <- RPCResponse{resp, err}
+	r.RespChan.Send(RPCResponse{resp, err})
 }
 
 // Transport provides an interface for network transports
@@ -31,7 +33,7 @@ func (r *RPC) Respond(resp interface{}, err error) {
 type Transport interface {
 	// Consumer returns a channel that can be used to
 	// consume and respond to RPC requests.
-	Consumer() <-chan RPC
+	Consumer() dst.Chan[RPC]
 
 	// LocalAddr is used to return our local address to distinguish from our peers.
 	LocalAddr() ServerAddress
@@ -116,7 +118,7 @@ type AppendPipeline interface {
 
 	// Consumer returns a channel that can be used to consume
 	// response futures when they are ready.
-	Consumer() <-chan AppendFuture
+	Consumer() dst.Chan[AppendFuture]
 
 	// Close closes the pipeline and cancels all inflight RPCs
 	Close() error

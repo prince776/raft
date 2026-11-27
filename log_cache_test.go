@@ -6,8 +6,9 @@ package raft
 import (
 	"errors"
 	"strings"
-	"sync"
 	"testing"
+
+	"github.com/prince776/go-dst-kit/dst"
 )
 
 func TestLogCache(t *testing.T) {
@@ -95,7 +96,7 @@ func TestLogCache(t *testing.T) {
 
 type errorStore struct {
 	LogStore
-	mu      sync.Mutex
+	mu      dst.Mutex
 	fail    bool
 	failed  int
 	failMax int

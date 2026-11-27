@@ -5,7 +5,8 @@ package raft
 
 import (
 	"fmt"
-	"sync"
+
+	"github.com/prince776/go-dst-kit/dst"
 )
 
 // LogCache wraps any LogStore implementation to provide an
@@ -17,7 +18,7 @@ type LogCache struct {
 	store LogStore
 
 	cache []*Log
-	l     sync.RWMutex
+	l     dst.RWMutex
 }
 
 // NewLogCache is used to create a new LogCache with the

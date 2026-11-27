@@ -8,6 +8,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"github.com/prince776/go-dst-kit/dst"
 	"hash"
 	"hash/crc64"
 	"io"
@@ -39,6 +40,8 @@ type FileSnapshotStore struct {
 	// noSync, if true, skips crash-safe file fsync api calls.
 	// It's a private field, only used in testing
 	noSync bool
+
+	w *dst.World // nil: the real World
 }
 
 type snapMetaSlice []*fileSnapshotMeta
@@ -150,8 +153,8 @@ func (f *FileSnapshotStore) testPermissions() error {
 }
 
 // snapshotName generates a name for the snapshot.
-func snapshotName(term, index uint64) string {
-	now := time.Now()
+func snapshotName(w *dst.World, term, index uint64) string {
+	now := w.Now()
 	msec := now.UnixNano() / int64(time.Millisecond)
 	return fmt.Sprintf("%d-%d-%d", term, index, msec)
 }
@@ -165,7 +168,7 @@ func (f *FileSnapshotStore) Create(version SnapshotVersion, index, term uint64,
 	}
 
 	// Create a new path
-	name := snapshotName(term, index)
+	name := snapshotName(f.world(), term, index)
 	path := filepath.Join(f.path, name+tmpSuffix)
 	f.logger.Info("creating new snapshot", "path", path)
 
@@ -548,4 +551,11 @@ func (s snapMetaSlice) Less(i, j int) bool {
 
 func (s snapMetaSlice) Swap(i, j int) {
 	s[i], s[j] = s[j], s[i]
+}
+
+func (f *FileSnapshotStore) world() *dst.World {
+	if f.w == nil {
+		return theRealWorld()
+	}
+	return f.w
 }

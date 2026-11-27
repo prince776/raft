@@ -8,6 +8,8 @@ import (
 	"regexp"
 	"testing"
 	"time"
+
+	"github.com/prince776/go-dst-kit/dst"
 )
 
 // TestMsgpackEncodeTime ensures that we don't break backwards compatibility when updating go-msgpack with
@@ -31,17 +33,26 @@ func TestMsgpackEncodeTimeDefaultFormat(t *testing.T) {
 }
 
 func TestRandomTimeout(t *testing.T) {
-	start := time.Now()
-	timeout := randomTimeout(time.Millisecond)
+	start := theRealWorld().Now()
+	timeout := randomTimeout(theRealWorld(), time.Millisecond)
 
-	select {
-	case <-timeout:
-		diff := time.Since(start)
-		if diff < time.Millisecond {
-			t.Fatalf("fired early")
+	{
+		var sel1 int
+		dst.Select(theRealWorld(),
+			dst.OnRecv(timeout, func(_ time.Time, _ bool) { sel1 = 1 }),
+			dst.OnRecv(theRealWorld().After(3*time.Millisecond), func(_ time.Time, _ bool) { sel1 = 2 }),
+		)
+		switch sel1 {
+		case 1:
+			diff := theRealWorld().Since(start)
+			if diff < time.Millisecond {
+				t.Fatalf("fired early")
+			}
+		case 2:
+			t.Fatalf("timeout")
+		default:
+			panic("dstmigrate: no select case ran")
 		}
-	case <-time.After(3 * time.Millisecond):
-		t.Fatalf("timeout")
 	}
 }
 
@@ -57,8 +68,8 @@ func TestNewSeed(t *testing.T) {
 }
 
 func TestRandomTimeout_NoTime(t *testing.T) {
-	timeout := randomTimeout(0)
-	if timeout != nil {
+	timeout := randomTimeout(theRealWorld(), 0)
+	if timeout != (dst.Chan[time.Time]{}) {
 		t.Fatalf("expected nil channel")
 	}
 }
@@ -88,14 +99,14 @@ func TestMax(t *testing.T) {
 }
 
 func TestGenerateUUID(t *testing.T) {
-	prev := generateUUID()
+	prev := generateUUID(theRealWorld())
 	re, err := regexp.Compile(`[\da-f]{8}-[\da-f]{4}-[\da-f]{4}-[\da-f]{4}-[\da-f]{12}`)
 	if err != nil {
 		t.Errorf("failed to copmile regex: %s", err)
 	}
 
 	for i := 0; i < 100; i++ {
-		id := generateUUID()
+		id := generateUUID(theRealWorld())
 		if prev == id {
 			t.Fatalf("Should get a new ID!")
 		}
@@ -130,24 +141,46 @@ func TestBackoff(t *testing.T) {
 }
 
 func TestOverrideNotifyBool(t *testing.T) {
-	ch := make(chan bool, 1)
+	ch := dst.MakeChan[bool](theRealWorld(), 1)
 
 	// sanity check - buffered channel don't have any values
-	select {
-	case v := <-ch:
-		t.Fatalf("unexpected receive: %v", v)
-	default:
+	{
+		var sel2 int
+		var sel2v1 bool
+		dst.Select(theRealWorld(),
+			dst.OnRecv(ch, func(v bool, _ bool) { sel2 = 1; sel2v1 = v }),
+			dst.Default(func() { sel2 = 2 }),
+		)
+		switch sel2 {
+		case 1:
+			v := sel2v1
+			t.Fatalf("unexpected receive: %v", v)
+		case 2:
+		default:
+			panic("dstmigrate: no select case ran")
+		}
 	}
 
 	// simple case of a single push
 	overrideNotifyBool(ch, false)
-	select {
-	case v := <-ch:
-		if v != false {
-			t.Fatalf("expected false but got %v", v)
+	{
+		var sel3 int
+		var sel3v1 bool
+		dst.Select(theRealWorld(),
+			dst.OnRecv(ch, func(v bool, _ bool) { sel3 = 1; sel3v1 = v }),
+			dst.Default(func() { sel3 = 2 }),
+		)
+		switch sel3 {
+		case 1:
+			v := sel3v1
+			if v != false {
+				t.Fatalf("expected false but got %v", v)
+			}
+		case 2:
+			t.Fatalf("expected a value but is not ready")
+		default:
+			panic("dstmigrate: no select case ran")
 		}
-	default:
-		t.Fatalf("expected a value but is not ready")
 	}
 
 	// assert that function never blocks and only last item is received
@@ -157,19 +190,41 @@ func TestOverrideNotifyBool(t *testing.T) {
 	overrideNotifyBool(ch, false)
 	overrideNotifyBool(ch, true)
 
-	select {
-	case v := <-ch:
-		if v != true {
-			t.Fatalf("expected true but got %v", v)
+	{
+		var sel4 int
+		var sel4v1 bool
+		dst.Select(theRealWorld(),
+			dst.OnRecv(ch, func(v bool, _ bool) { sel4 = 1; sel4v1 = v }),
+			dst.Default(func() { sel4 = 2 }),
+		)
+		switch sel4 {
+		case 1:
+			v := sel4v1
+			if v != true {
+				t.Fatalf("expected true but got %v", v)
+			}
+		case 2:
+			t.Fatalf("expected a value but is not ready")
+		default:
+			panic("dstmigrate: no select case ran")
 		}
-	default:
-		t.Fatalf("expected a value but is not ready")
 	}
 
 	// no further value is available
-	select {
-	case v := <-ch:
-		t.Fatalf("unexpected receive: %v", v)
-	default:
+	{
+		var sel5 int
+		var sel5v1 bool
+		dst.Select(theRealWorld(),
+			dst.OnRecv(ch, func(v bool, _ bool) { sel5 = 1; sel5v1 = v }),
+			dst.Default(func() { sel5 = 2 }),
+		)
+		switch sel5 {
+		case 1:
+			v := sel5v1
+			t.Fatalf("unexpected receive: %v", v)
+		case 2:
+		default:
+			panic("dstmigrate: no select case ran")
+		}
 	}
 }

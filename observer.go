@@ -6,6 +6,8 @@ package raft
 import (
 	"sync/atomic"
 	"time"
+
+	"github.com/prince776/go-dst-kit/dst"
 )
 
 // Observation is sent along the given channel to observers when an event occurs.
@@ -63,7 +65,7 @@ type Observer struct {
 	numDropped  uint64
 
 	// channel receives observations.
-	channel chan Observation
+	channel dst.Chan[Observation]
 
 	// blocking, if true, will cause Raft to block when sending an observation
 	// to this observer. This should generally be set to false.
@@ -84,7 +86,7 @@ type Observer struct {
 //
 // If blocking is true, the observer will block when it can't
 // send on the channel, otherwise it may discard events.
-func NewObserver(channel chan Observation, blocking bool, filter FilterFn) *Observer {
+func NewObserver(channel dst.Chan[Observation], blocking bool, filter FilterFn) *Observer {
 	return &Observer{
 		channel:  channel,
 		blocking: blocking,
@@ -131,18 +133,27 @@ func (r *Raft) observe(o interface{}) {
 		if or.filter != nil && !or.filter(&ob) {
 			continue
 		}
-		if or.channel == nil {
+		if or.channel == (dst.Chan[Observation]{}) {
 			continue
 		}
 		if or.blocking {
-			or.channel <- ob
+			or.channel.Send(ob)
 			atomic.AddUint64(&or.numObserved, 1)
 		} else {
-			select {
-			case or.channel <- ob:
-				atomic.AddUint64(&or.numObserved, 1)
-			default:
-				atomic.AddUint64(&or.numDropped, 1)
+			{
+				var sel1 int
+				dst.Select(r.w,
+					dst.OnSend(or.channel, ob, func() { sel1 = 1 }),
+					dst.Default(func() { sel1 = 2 }),
+				)
+				switch sel1 {
+				case 1:
+					atomic.AddUint64(&or.numObserved, 1)
+				case 2:
+					atomic.AddUint64(&or.numDropped, 1)
+				default:
+					panic("dstmigrate: no select case ran")
+				}
 			}
 		}
 	}
