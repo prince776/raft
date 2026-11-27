@@ -8,17 +8,16 @@
     "TestDSTPartitions",
     "TestDSTEverything",
     "TestDSTFourNodes",
-    "TestDSTFourNodesAmnesia"
+    "TestDSTMembership"
   ],
   "bugs": [
     {
       "name": "quorum-off-by-one",
       "tests": [
         "TestDSTFourNodes",
-        "TestDSTFourNodesAmnesia"
+        "TestDSTMembership"
       ],
-      "note": "Upstream 163a55f: an even cluster commits on half its nodes. Only even clusters run different code. With disks that keep what was fsynced it can't lose a write (a commit quorum of 2 still meets every election quorum of 3); it takes one node losing its disk during a 2|2 split (TestDSTQuorumOffByOneScripted plays that sequence).",
-      "reached": "a node lost its disk"
+      "note": "Upstream 163a55f: an even cluster commits on half its nodes. Only even configurations run different code. Within raft's fault model no black-box check can see it: a commit quorum of 2 still meets every election quorum of 3, so Leader Completeness holds. It loses writes only if a node forgets what it acknowledged (amnesia, outside the model: TestDSTQuorumOffByOneScripted)."
     },
     {
       "name": "vote-twice",
@@ -93,6 +92,35 @@
       "reached": "a snapshot was persisted",
       "held_out": true,
       "note": "Log compaction deletes entries after the snapshot's last index."
+    },
+    {
+      "name": "nonvoter-can-lead",
+      "tests": [
+        "TestDSTMembership"
+      ],
+      "note": "Upstream 656e6c0 with 6b4e320's suffrage checks: a non-voter campaigns, and voters grant it votes."
+    },
+    {
+      "name": "lease-counts-nonvoters",
+      "tests": [
+        "TestDSTMembership"
+      ],
+      "note": "Upstream 6e41709: the leader lease counts non-voters (and itself twice) toward a quorum."
+    },
+    {
+      "name": "two-changes-in-flight",
+      "tests": [
+        "TestDSTMembership"
+      ],
+      "note": "A membership change is accepted while another is uncommitted (single-server changes must go one at a time)."
+    },
+    {
+      "name": "config-change-before-noop",
+      "tests": [
+        "TestDSTMembership"
+      ],
+      "held_out": true,
+      "note": "A new leader accepts a membership change before committing an entry of its term (the raft-dev single-server change bug, 2015)."
     }
   ]
 }

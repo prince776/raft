@@ -292,7 +292,7 @@ func (r *Raft) runFollower() {
 					}
 				} else {
 					metrics.IncrCounter([]string{"raft", "transition", "heartbeat_timeout"}, 1)
-					if hasVote(r.configurations.latest, r.localID) {
+					if hasVote(r.configurations.latest, r.localID) || (bug("nonvoter-can-lead") && inConfiguration(r.configurations.latest, r.localID)) {
 						r.logger.Warn("heartbeat timeout reached, starting election", "last-leader-addr", lastLeaderAddr, "last-leader-id", lastLeaderID)
 						r.setState(Candidate)
 						return
@@ -794,8 +794,8 @@ func (r *Raft) configurationChangeChIfStable() dst.Chan[*configurationChangeFutu
 	// 1. The latest configuration is committed, and
 	// 2. This leader has committed some entry (the noop) in this term
 	//    https://groups.google.com/forum/#!msg/raft-dev/t4xj6dJTP6E/d2D9LrWRza8J
-	if r.configurations.latestIndex == r.configurations.committedIndex &&
-		r.getCommitIndex() >= r.leaderState.commitment.startIndex {
+	if (r.configurations.latestIndex == r.configurations.committedIndex || bug("two-changes-in-flight")) &&
+		(r.getCommitIndex() >= r.leaderState.commitment.startIndex || bug("config-change-before-noop")) {
 		return r.configurationChangeCh
 	}
 	return (dst.Chan[*configurationChangeFuture]{})
@@ -1278,7 +1278,7 @@ func (r *Raft) checkLeaderLease() time.Duration {
 	var maxDiff time.Duration
 	now := r.w.Now()
 	for _, server := range r.configurations.latest.Servers {
-		if server.Suffrage == Voter {
+		if server.Suffrage == Voter || bug("lease-counts-nonvoters") {
 			if server.ID == r.localID {
 				contacted++
 				continue
@@ -1922,7 +1922,7 @@ func (r *Raft) requestVote(rpc RPC, req *RequestVoteRequest) {
 		candidateID := ServerID(req.ID)
 		// if the Servers list is empty that mean the cluster is very likely trying to bootstrap,
 		// Grant the vote
-		if len(r.configurations.latest.Servers) > 0 && !inConfiguration(r.configurations.latest, candidateID) {
+		if len(r.configurations.latest.Servers) > 0 && !inConfiguration(r.configurations.latest, candidateID) && !bug("no-candidate-config-check") {
 			r.logger.Warn("rejecting vote request since node is not in configuration",
 				"from", candidate)
 			return
@@ -1958,7 +1958,7 @@ func (r *Raft) requestVote(rpc RPC, req *RequestVoteRequest) {
 	// More details about that in https://github.com/hashicorp/raft/pull/526
 	if len(req.ID) > 0 {
 		candidateID := ServerID(req.ID)
-		if len(r.configurations.latest.Servers) > 0 && !hasVote(r.configurations.latest, candidateID) {
+		if len(r.configurations.latest.Servers) > 0 && !hasVote(r.configurations.latest, candidateID) && !bug("nonvoter-can-lead") && !bug("no-candidate-config-check") {
 			r.logger.Warn("rejecting vote request since node is not a voter", "from", candidate)
 			return
 		}
@@ -2035,7 +2035,7 @@ func (r *Raft) requestPreVote(rpc RPC, req *RequestPreVoteRequest) {
 
 	// if the Servers list is empty that mean the cluster is very likely trying to bootstrap,
 	// Grant the vote
-	if len(r.configurations.latest.Servers) > 0 && !inConfiguration(r.configurations.latest, candidateID) {
+	if len(r.configurations.latest.Servers) > 0 && !inConfiguration(r.configurations.latest, candidateID) && !bug("no-candidate-config-check") {
 		r.logger.Warn("rejecting pre-vote request since node is not in configuration",
 			"from", candidate)
 		return
@@ -2062,7 +2062,7 @@ func (r *Raft) requestPreVote(rpc RPC, req *RequestPreVoteRequest) {
 
 	// if we get a request for a pre-vote from a nonVoter  and the request term is higher, do not grant the Pre-Vote
 	// This could happen when a node, previously voter, is converted to non-voter
-	if len(r.configurations.latest.Servers) > 0 && !hasVote(r.configurations.latest, candidateID) {
+	if len(r.configurations.latest.Servers) > 0 && !hasVote(r.configurations.latest, candidateID) && !bug("nonvoter-can-lead") && !bug("no-candidate-config-check") {
 		r.logger.Warn("rejecting pre-vote request since node is not a voter", "from", candidate)
 		return
 	}

@@ -3,6 +3,7 @@
 package raft
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -117,4 +118,96 @@ func TestDSTQuorumOffByOneScripted(t *testing.T) {
 		kinds[dsttest.Signature(r.Err)]++
 	}
 	t.Logf("with the bug: %d of %d seeds failed: %v", len(rep.Failed), rep.Runs, kinds)
+}
+
+// staleConfigScript plays a sequence inside raft's fault model (one
+// partition, one server removed, one lost for good) that leaves a live
+// majority of the voters unable to elect a leader. Three voters {A, B, C},
+// A leading, and a spare D:
+//
+//  1. C is cut off.
+//  2. A adds D as a non-voter and, once D has caught up, promotes it:
+//     {A, B, C, D}, committed by A, B and D.
+//  3. A removes B: {A, C, D}, committed by A and D. (B's raft shuts down.)
+//  4. A is lost for good; C and D are two of {A, C, D}'s three voters.
+//  5. C is reconnected. Its latest configuration is still {A, B, C}.
+//
+// D, the most up to date, asks C for a (pre-)vote, and C rejects it: D
+// isn't in C's configuration (the candidate checks 6b4e320 added). C's
+// own campaigns can't win: in C's configuration, A is gone and B shut
+// down. Plain Raft has no such check: C grants D its vote (D's log is
+// ahead), D wins, and catches C up.
+func staleConfigScript(h *dsttest.Harness) {
+	c := newCluster(h, clusterSpec{voters: 3, spares: 1})
+	h.Go(func(w *dst.World) {
+		var a *dstNode
+		for a == nil {
+			w.Sleep(50 * time.Millisecond)
+			a = c.leader()
+		}
+		w.Sleep(500 * time.Millisecond)
+		var b, cc *dstNode
+		for _, nd := range c.nodes[:3] {
+			switch {
+			case nd == a:
+			case b == nil:
+				b = nd
+			default:
+				cc = nd
+			}
+		}
+		d := c.nodes[3]
+		step := func(what string, f Future) bool {
+			if err := f.Error(); err != nil {
+				h.Fail(fmt.Errorf("script: %s: %v", what, err))
+				return false
+			}
+			return true
+		}
+		h.Partition([]string{cc.name}, []string{a.name, b.name, d.name, "test"})
+		if !step("add D", a.raft.AddNonvoter(d.id(), d.addr(), 0, time.Second)) {
+			return
+		}
+		for d.raft.getLastIndex() < a.raft.getCommitIndex() {
+			w.Sleep(10 * time.Millisecond)
+		}
+		if !step("promote D", a.raft.AddVoter(d.id(), d.addr(), 0, time.Second)) ||
+			!step("remove B", a.raft.RemoveServer(b.id(), 0, time.Second)) {
+			return
+		}
+		w.Sleep(200 * time.Millisecond) // D learns the commit
+		a.m.Lose()
+		h.Heal()
+		h.Sometimes("the script ran")
+	})
+	h.Expect("the script ran")
+}
+
+// Verifies: hashicorp/raft can lose liveness for good with a live majority
+// of its voters (staleConfigScript), and the candidate checks of 6b4e320
+// are why.
+// Fails if: correct raft recovers from the sequence (no stall to report),
+// or it doesn't recover with the candidate checks off (they aren't the
+// cause), or the script didn't run.
+func TestDSTStaleConfigStall(t *testing.T) {
+	o := dstOpts(dsttest.Faults{})
+	o.Seeds, o.KeepGoing, o.DeterminismChecks = 20, true, -1
+	activeBug = ""
+	rep := dsttest.Sweep(o, staleConfigScript)
+	stalled := 0
+	for _, r := range rep.Failed {
+		if !strings.Contains(r.Err.Error(), `"the cluster recovers"`) {
+			t.Fatalf("seed %d failed otherwise: %v", r.Seed, r.Err)
+		}
+		stalled++
+	}
+	if stalled == 0 {
+		t.Fatalf("correct raft recovered on all %d seeds", rep.Runs)
+	}
+	t.Logf("correct raft: no leader again on %d of %d seeds", stalled, rep.Runs)
+	activeBug = "no-candidate-config-check"
+	defer func() { activeBug = "" }()
+	if rep := dsttest.Sweep(o, staleConfigScript); len(rep.Failed) > 0 {
+		t.Fatalf("with the candidate checks off, %d of %d seeds still failed: %v", len(rep.Failed), rep.Runs, rep.Failed[0].Err)
+	}
 }
