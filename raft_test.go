@@ -4,6 +4,7 @@
 package raft
 
 import (
+	"github.com/prince776/go-dst-kit/realworld"
 	"bytes"
 	"encoding/json"
 	"errors"
@@ -888,7 +889,7 @@ func TestRaft_AddKnownPeer(t *testing.T) {
 	followers := c.GetInState(Follower)
 
 	configReq := &configurationsFuture{}
-	configReq.init()
+	configReq.init(realworld.New(realworld.Options{}))
 	leader.configurationsCh <- configReq
 	if err := configReq.Error(); err != nil {
 		t.Fatalf("err: %v", err)
@@ -902,7 +903,7 @@ func TestRaft_AddKnownPeer(t *testing.T) {
 		t.Fatalf("AddVoter() err: %v", err)
 	}
 	configReq = &configurationsFuture{}
-	configReq.init()
+	configReq.init(realworld.New(realworld.Options{}))
 	leader.configurationsCh <- configReq
 	if err := configReq.Error(); err != nil {
 		t.Fatalf("err: %v", err)
@@ -925,7 +926,7 @@ func TestRaft_RemoveUnknownPeer(t *testing.T) {
 	// Get the leader
 	leader := c.Leader()
 	configReq := &configurationsFuture{}
-	configReq.init()
+	configReq.init(realworld.New(realworld.Options{}))
 	leader.configurationsCh <- configReq
 	if err := configReq.Error(); err != nil {
 		t.Fatalf("err: %v", err)
@@ -941,7 +942,7 @@ func TestRaft_RemoveUnknownPeer(t *testing.T) {
 		t.Fatalf("RemoveServer() err: %v", err)
 	}
 	configReq = &configurationsFuture{}
-	configReq.init()
+	configReq.init(realworld.New(realworld.Options{}))
 	leader.configurationsCh <- configReq
 	if err := configReq.Error(); err != nil {
 		t.Fatalf("err: %v", err)

@@ -4,6 +4,7 @@
 package raft
 
 import (
+	"github.com/prince776/go-dst-kit/dst"
 	"context"
 	"io"
 	"sync"
@@ -25,6 +26,8 @@ type snapshotRestoreMonitor struct {
 	once   sync.Once
 	cancel func()
 	doneCh chan struct{}
+
+	w *dst.World
 }
 
 func startSnapshotRestoreMonitor(

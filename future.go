@@ -4,6 +4,7 @@
 package raft
 
 import (
+	"github.com/prince776/go-dst-kit/dst"
 	"fmt"
 	"io"
 	"sync"
@@ -94,9 +95,12 @@ type deferError struct {
 	errCh      chan error
 	responded  bool
 	ShutdownCh chan struct{}
+
+	w *dst.World
 }
 
-func (d *deferError) init() {
+func (d *deferError) init(w *dst.World) {
+	d.w = w
 	d.errCh = make(chan error, 1)
 }
 

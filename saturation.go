@@ -4,6 +4,7 @@
 package raft
 
 import (
+	"github.com/prince776/go-dst-kit/dst"
 	"math"
 	"time"
 
@@ -36,6 +37,8 @@ type saturationMetric struct {
 	// These are overwritten in tests.
 	nowFn    func() time.Time
 	reportFn func(float32)
+
+	w *dst.World
 }
 
 // newSaturationMetric creates a saturationMetric that will update the gauge

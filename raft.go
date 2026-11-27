@@ -121,7 +121,7 @@ func (r *Raft) requestConfigChange(req configurationChangeRequest, timeout time.
 	future := &configurationChangeFuture{
 		req: req,
 	}
-	future.init()
+	future.init(r.w)
 	select {
 	case <-timer:
 		return errorFuture{ErrEnqueueTimeout}
@@ -999,7 +999,7 @@ func (r *Raft) leadershipTransfer(id ServerID, address ServerAddress, repl *foll
 
 	for atomic.LoadUint64(&repl.nextIndex) <= r.getLastIndex() {
 		err := &deferError{}
-		err.init()
+		err.init(r.w)
 		repl.triggerDeferErrorCh <- err
 		select {
 		case err := <-err.errCh:
@@ -1168,7 +1168,7 @@ func (r *Raft) restoreUserSnapshot(meta *SnapshotMeta, reader io.Reader) error {
 	// bad state so we panic to take ourselves out.
 	fsm := &restoreFuture{ID: sink.ID()}
 	fsm.ShutdownCh = r.shutdownCh
-	fsm.init()
+	fsm.init(r.w)
 	select {
 	case r.fsmMutateCh <- fsm:
 	case <-r.shutdownCh:
@@ -1935,7 +1935,7 @@ func (r *Raft) installSnapshot(rpc RPC, req *InstallSnapshotRequest) {
 	// Restore snapshot
 	future := &restoreFuture{ID: sink.ID()}
 	future.ShutdownCh = r.shutdownCh
-	future.init()
+	future.init(r.w)
 	select {
 	case r.fsmMutateCh <- future:
 	case <-r.shutdownCh:
@@ -2209,7 +2209,7 @@ func (r *Raft) pickServer() *Server {
 // mainloop.
 func (r *Raft) initiateLeadershipTransfer(id *ServerID, address *ServerAddress) LeadershipTransferFuture {
 	future := &leadershipTransferFuture{ID: id, Address: address}
-	future.init()
+	future.init(r.w)
 
 	if id != nil && *id == r.localID {
 		err := fmt.Errorf("cannot transfer leadership to itself")

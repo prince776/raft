@@ -4,6 +4,7 @@
 package raft
 
 import (
+	"github.com/prince776/go-dst-kit/dst"
 	"errors"
 	"fmt"
 	"sync"
@@ -93,6 +94,8 @@ type followerReplication struct {
 	// allowPipeline is used to determine when to pipeline the AppendEntries RPCs.
 	// It is private to this replication goroutine.
 	allowPipeline bool
+
+	w *dst.World
 }
 
 // notifyAll is used to notify all the waiting verify futures

@@ -4,6 +4,7 @@
 package raft
 
 import (
+	"github.com/prince776/go-dst-kit/dst"
 	"sync"
 	"sync/atomic"
 )
@@ -74,6 +75,9 @@ type raftState struct {
 
 	// The current state
 	state RaftState
+
+	// w is the World raft runs in: the real one unless Config.World says.
+	w *dst.World
 }
 
 func (r *raftState) getState() RaftState {

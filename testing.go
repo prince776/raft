@@ -4,6 +4,7 @@
 package raft
 
 import (
+	"github.com/prince776/go-dst-kit/dst"
 	"bytes"
 	"context"
 	"fmt"
@@ -238,6 +239,8 @@ type cluster struct {
 	failedLock sync.Mutex
 	failedCh   chan struct{}
 	failed     bool
+
+	w *dst.World
 }
 
 func (c *cluster) Merge(other *cluster) {

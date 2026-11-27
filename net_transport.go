@@ -4,6 +4,7 @@
 package raft
 
 import (
+	"github.com/prince776/go-dst-kit/dst"
 	"bufio"
 	"context"
 	"errors"
@@ -110,6 +111,8 @@ type NetworkTransport struct {
 	TimeoutScale int
 
 	msgpackUseNewTimeFormat bool
+
+	w *dst.World
 }
 
 // NetworkTransportConfig encapsulates configuration for the network transport layer.
@@ -167,6 +170,9 @@ type NetworkTransportConfig struct {
 	// go-msgpack v1.1.5 by default). Decoding is not affected, as all
 	// go-msgpack v2.1.0+ decoders know how to decode both formats.
 	MsgpackUseNewTimeFormat bool
+
+	// World is the World the transport runs in (nil: the real one).
+	World *dst.World
 }
 
 // ServerAddressProvider is a target address to which we invoke an RPC when establishing a connection
@@ -865,7 +871,7 @@ func (n *netPipeline) AppendEntries(args *AppendEntriesRequest, resp *AppendEntr
 		args:  args,
 		resp:  resp,
 	}
-	future.init()
+	future.init(n.trans.w)
 
 	// Add a send timeout
 	if timeout := n.trans.timeout; timeout > 0 {

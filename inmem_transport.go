@@ -4,6 +4,7 @@
 package raft
 
 import (
+	"github.com/prince776/go-dst-kit/dst"
 	"fmt"
 	"io"
 	"sync"
@@ -44,6 +45,8 @@ type InmemTransport struct {
 	peers      map[ServerAddress]*InmemTransport
 	pipelines  []*inmemPipeline
 	timeout    time.Duration
+
+	w *dst.World
 }
 
 // NewInmemTransportWithTimeout is used to initialize a new transport and
@@ -315,7 +318,7 @@ func (i *inmemPipeline) AppendEntries(args *AppendEntriesRequest, resp *AppendEn
 		args:  args,
 		resp:  resp,
 	}
-	future.init()
+	future.init(i.trans.w)
 
 	// Handle a timeout
 	var timeout <-chan time.Time

@@ -4,6 +4,7 @@
 package raft
 
 import (
+	"github.com/prince776/go-dst-kit/dst"
 	"fmt"
 	"io"
 	"os"
@@ -255,6 +256,11 @@ type Config struct {
 
 	// skipStartup allows NewRaft() to bypass all background work goroutines
 	skipStartup bool
+
+	// World is the World raft runs in (go-dst-kit): its goroutines, timers,
+	// clock, channels and randomness. Nil is the real World; a simulated
+	// World makes a run deterministic, for simulation tests.
+	World *dst.World
 }
 
 func (conf *Config) getOrCreateLogger() hclog.Logger {
