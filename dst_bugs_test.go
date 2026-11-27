@@ -188,7 +188,8 @@ func staleConfigScript(h *dsttest.Harness) {
 // are why.
 // Fails if: correct raft recovers from the sequence (no stall to report),
 // or it doesn't recover with the candidate checks off (they aren't the
-// cause), or the script didn't run.
+// cause) or with the proposed fix (the checks only when the candidate's
+// log isn't ahead: UPSTREAM-ISSUE-DRAFT.md), or the script didn't run.
 func TestDSTStaleConfigStall(t *testing.T) {
 	o := dstOpts(dsttest.Faults{})
 	o.Seeds, o.KeepGoing, o.DeterminismChecks = 20, true, -1
@@ -205,9 +206,11 @@ func TestDSTStaleConfigStall(t *testing.T) {
 		t.Fatalf("correct raft recovered on all %d seeds", rep.Runs)
 	}
 	t.Logf("correct raft: no leader again on %d of %d seeds", stalled, rep.Runs)
-	activeBug = "no-candidate-config-check"
 	defer func() { activeBug = "" }()
-	if rep := dsttest.Sweep(o, staleConfigScript); len(rep.Failed) > 0 {
-		t.Fatalf("with the candidate checks off, %d of %d seeds still failed: %v", len(rep.Failed), rep.Runs, rep.Failed[0].Err)
+	for _, fix := range []string{"no-candidate-config-check", "candidate-check-unless-ahead"} {
+		activeBug = fix
+		if rep := dsttest.Sweep(o, staleConfigScript); len(rep.Failed) > 0 {
+			t.Fatalf("with %s, %d of %d seeds still failed: %v", fix, len(rep.Failed), rep.Runs, rep.Failed[0].Err)
+		}
 	}
 }

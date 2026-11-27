@@ -228,4 +228,3 @@ func (c *kvClient) readIndex(key string) {
 	call.Return(check.KVOutput{Value: res.Value, Found: res.Found})
 	h.Sometimes("a ReadIndex read")
 }
-

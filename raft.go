@@ -1922,7 +1922,7 @@ func (r *Raft) requestVote(rpc RPC, req *RequestVoteRequest) {
 		candidateID := ServerID(req.ID)
 		// if the Servers list is empty that mean the cluster is very likely trying to bootstrap,
 		// Grant the vote
-		if len(r.configurations.latest.Servers) > 0 && !inConfiguration(r.configurations.latest, candidateID) && !bug("no-candidate-config-check") {
+		if len(r.configurations.latest.Servers) > 0 && !inConfiguration(r.configurations.latest, candidateID) && !bug("no-candidate-config-check") && !(bug("candidate-check-unless-ahead") && candidateAhead(r, req.LastLogTerm, req.LastLogIndex)) {
 			r.logger.Warn("rejecting vote request since node is not in configuration",
 				"from", candidate)
 			return
@@ -1958,7 +1958,7 @@ func (r *Raft) requestVote(rpc RPC, req *RequestVoteRequest) {
 	// More details about that in https://github.com/hashicorp/raft/pull/526
 	if len(req.ID) > 0 {
 		candidateID := ServerID(req.ID)
-		if len(r.configurations.latest.Servers) > 0 && !hasVote(r.configurations.latest, candidateID) && !bug("nonvoter-can-lead") && !bug("no-candidate-config-check") {
+		if len(r.configurations.latest.Servers) > 0 && !hasVote(r.configurations.latest, candidateID) && !bug("nonvoter-can-lead") && !bug("no-candidate-config-check") && !(bug("candidate-check-unless-ahead") && candidateAhead(r, req.LastLogTerm, req.LastLogIndex)) {
 			r.logger.Warn("rejecting vote request since node is not a voter", "from", candidate)
 			return
 		}
@@ -2035,7 +2035,7 @@ func (r *Raft) requestPreVote(rpc RPC, req *RequestPreVoteRequest) {
 
 	// if the Servers list is empty that mean the cluster is very likely trying to bootstrap,
 	// Grant the vote
-	if len(r.configurations.latest.Servers) > 0 && !inConfiguration(r.configurations.latest, candidateID) && !bug("no-candidate-config-check") {
+	if len(r.configurations.latest.Servers) > 0 && !inConfiguration(r.configurations.latest, candidateID) && !bug("no-candidate-config-check") && !(bug("candidate-check-unless-ahead") && candidateAhead(r, req.LastLogTerm, req.LastLogIndex)) {
 		r.logger.Warn("rejecting pre-vote request since node is not in configuration",
 			"from", candidate)
 		return
@@ -2062,7 +2062,7 @@ func (r *Raft) requestPreVote(rpc RPC, req *RequestPreVoteRequest) {
 
 	// if we get a request for a pre-vote from a nonVoter  and the request term is higher, do not grant the Pre-Vote
 	// This could happen when a node, previously voter, is converted to non-voter
-	if len(r.configurations.latest.Servers) > 0 && !hasVote(r.configurations.latest, candidateID) && !bug("nonvoter-can-lead") && !bug("no-candidate-config-check") {
+	if len(r.configurations.latest.Servers) > 0 && !hasVote(r.configurations.latest, candidateID) && !bug("nonvoter-can-lead") && !bug("no-candidate-config-check") && !(bug("candidate-check-unless-ahead") && candidateAhead(r, req.LastLogTerm, req.LastLogIndex)) {
 		r.logger.Warn("rejecting pre-vote request since node is not a voter", "from", candidate)
 		return
 	}
