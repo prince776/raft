@@ -552,3 +552,13 @@ edit('raft.go', in_func('func (r *Raft) appendEntriesOn(', '''	if a.Term > r.get
 			return
 		}
 		// Ensure transition to follower'''))
+
+# Phase 2 step 2's plant: a follower ignores the leader's commit index, so
+# it never applies (caught only by "every member catches up").
+edit('raft.go', in_func('func (r *Raft) appendEntriesOn(', 'if a.LeaderCommitIndex > 0 && a.LeaderCommitIndex > r.getCommitIndex() {',
+     'if a.LeaderCommitIndex > 0 && a.LeaderCommitIndex > r.getCommitIndex() && !bug("follower-ignores-commit") {'))
+
+# newSeed (only upstream's util_test calls it) stays on crypto/rand:
+# dstmigrate now maps crypto/rand.Reader to the World's, and no World is
+# in scope there.
+edit('util.go', lambda s: s.replace('crand.Int(dst.CryptoReader(__w), big.NewInt(math.MaxInt64))', 'crand.Int(crand.Reader, big.NewInt(math.MaxInt64))', 1))

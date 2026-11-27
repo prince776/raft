@@ -1867,7 +1867,7 @@ func (r *Raft) appendEntriesOn(rpc RPC, a *AppendEntriesRequest, heartbeat bool)
 	}
 
 	// Update the commit index
-	if a.LeaderCommitIndex > 0 && a.LeaderCommitIndex > r.getCommitIndex() {
+	if a.LeaderCommitIndex > 0 && a.LeaderCommitIndex > r.getCommitIndex() && !bug("follower-ignores-commit") {
 		start := r.w.Now()
 		idx := min(a.LeaderCommitIndex, r.getLastIndex())
 		r.setCommitIndex(idx)

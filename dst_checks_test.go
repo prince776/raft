@@ -137,6 +137,7 @@ func (c *simCluster) checks() {
 		return nil
 	})
 	h.Final("the cluster recovers", func(w *dst.World) error { return c.recovers(w) })
+	h.Final("every member catches up", func(w *dst.World) error { return c.catchesUp(w) })
 	h.Final("the clients' history is linearizable", func(w *dst.World) error {
 		return check.Linearizable(check.KVModel(), c.kv.hist.Ops(), check.Options{}).Err()
 	})
@@ -212,13 +213,53 @@ func (c *simCluster) recovers(w *dst.World) error {
 	}
 }
 
+// catchesUp: after the faults (and the recovery probe), every member
+// applies what the leader has committed, within patience (phase 2 step
+// 2). "The cluster recovers" needs only a leader that commits, and "the
+// same sequence" accepts a member stuck on a prefix, so neither sees a
+// follower that never catches up (a livelock like #697's snapshot loop,
+// or bug 4's).
+func (c *simCluster) catchesUp(w *dst.World) error {
+	deadline := w.Now().Add(c.patience())
+	var target uint64
+	for {
+		if l := c.leader(); l != nil && target == 0 {
+			target = l.raft.getCommitIndex()
+		}
+		var behind []string
+		if target != 0 {
+			for _, nd := range c.members() {
+				if nd.up() && nd.raft.getState() == Shutdown {
+					// A leader demoted or removed shuts down with
+					// ShutdownOnRemove (6.3): listed, no longer taking part.
+					c.h.Sometimes("a member's raft was shut down")
+					continue
+				}
+				if !nd.up() || nd.raft.getLastApplied() < target {
+					behind = append(behind, nd.name)
+				}
+			}
+			if len(behind) == 0 {
+				return nil
+			}
+		}
+		if w.Now().After(deadline) {
+			if target == 0 {
+				return fmt.Errorf("no leader %v after the faults ended:\n%s", c.patience(), c.describe())
+			}
+			return fmt.Errorf("%v after the faults ended, %v haven't applied the leader's commit index %d:\n%s", c.patience(), behind, target, c.describe())
+		}
+		w.Sleep(50 * time.Millisecond)
+	}
+}
+
 // members are the nodes that are part of the cluster at the end: in the
-// leader's committed configuration (every node without the operator), not
-// lost, and booted.
+// leader's committed configuration (scripts change membership without the
+// operator too), not lost, and booted.
 func (c *simCluster) members() []*dstNode {
 	var out []*dstNode
 	var cfg *Configuration
-	if l := c.leader(); l != nil && c.op != nil {
+	if l := c.leader(); l != nil {
 		committed := l.raft.configurations.committed
 		cfg = &committed
 	}

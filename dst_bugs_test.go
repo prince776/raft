@@ -37,6 +37,8 @@ func TestDSTChecksCatchBugs(t *testing.T) {
 		{"vote-twice", []string{"one vote per term"}, dsttest.Faults{Crash: true, Disk: true, Partition: true, Network: true}, 4},
 		{"skip-prev-log-term", []string{"logs match"}, dsttest.Faults{Crash: true, Disk: true, Partition: true, Network: true, Pause: true}, 5},
 		{"vote-ignores-log", []string{"leaders hold every committed entry"}, dsttest.Faults{Crash: true, Disk: true, Partition: true, Network: true}, 5},
+		// Step 2: a follower that never applies is seen only here.
+		{"follower-ignores-commit", []string{"every member catches up"}, dsttest.Faults{Crash: true}, 3},
 		// The term check is strict only with 6.13's fix on.
 		{"forget-term-on-restart,heartbeat-on-main-thread", []string{"terms never go back"}, dsttest.Faults{Crash: true, Disk: true}, 3},
 		{"accept-stale-leader", []string{"leaders hold every committed entry", "the clients' history is linearizable", "acknowledged writes survive", "the nodes applied the same sequence"},

@@ -774,6 +774,21 @@ on (`knownFixes`), and counts the regressions otherwise
 (`a node's term went back (6.13)`). Cost: small (the default sweeps' speed
 is unchanged within noise).
 
+### Step 2: every member catches up (as built)
+
+`catchesUp`, a final check after "the cluster recovers": every member
+(in the committed configuration, not lost) applies the leader's commit
+index within the patience bound (5s, or ten election timeouts with a
+drawn configuration). "The cluster recovers" needs only a leader that
+commits, and "the same sequence" accepts a member stuck on a prefix, so
+neither could see a follower that never catches up. Planted bug
+`follower-ignores-commit` (a follower ignores the leader's commit index):
+caught on 10 of 10 seeds, by this check alone. A member whose raft shut
+itself down (6.3, demoted or removed with `ShutdownOnRemove`) is skipped
+and counted, as the operator's agreement check already does: the first
+sweep's three failures (Membership seeds 9, 28, 50) were all that.
+Membership then passes 200 of 200.
+
 ## 11. How to run
 
 The fork builds against a local go-dst-kit through a `go.work` (not
