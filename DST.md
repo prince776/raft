@@ -559,6 +559,33 @@ Fix (switch `snapshot-install-rule7`, in `knownFixes`): discard the log
 when it doesn't hold the snapshot's last entry, and set the last log to the
 snapshot. Seed 266 passes with it.
 
+### 6.18 A leader keeps a configuration its log never got (safety risk; new)
+
+Found by phase 3's combined sweep: the 300-seed no-bug hunt failed seed
+149 ("the members agree on the configuration"), with every other fix on.
+n3, the leader, demoted n6. Its log store's write of that entry failed
+(an fsync EIO): `dispatchLogs` answers the future with the error and steps
+down to Follower. But `appendConfigurationEntry` then adopts the new
+configuration anyway (`setLatestConfiguration` after `dispatchLogs`, with
+no check). The node now holds a configuration no log holds. A later
+leader fills that index with other entries; once it commits, n3's
+committed configuration is the phantom too. At the end all eight nodes
+hold the same log to index 48 (term 7), and n3 alone thinks n6 is a
+non-voter. Raft counts votes and commits against its configuration, so a
+node acting on a phantom configuration could, as leader, count a quorum of
+the wrong servers.
+
+`TestFailedConfigWrite` (`dst_boundary_scripted_test.go`, raft's in-memory
+pieces, no simulation): the leader's log store fails the DemoteVoter
+entry's write once. On upstream the leader's latest configuration holds
+the demotion and no entry in its log does; with the fix it doesn't.
+
+Fix (switch `config-only-if-stored`, in `knownFixes`): adopt the
+configuration only if the leader is still leader after `dispatchLogs` (a
+failed store stepped it down). Seed 149 passes with it, and the 300-seed
+hunt passes. Its rate in the combined sweep is in phase 3's baseline
+(10b).
+
 ## 7. The bug benchmark
 
 `dstbench.json`: bugs behind switches (`bug(name)` in `dstbugs*.go`, only

@@ -1490,6 +1490,12 @@ func (r *Raft) appendConfigurationEntry(future *configurationChangeFuture) {
 	}
 
 	r.dispatchLogs([]*logFuture{&future.logFuture})
+	if bug("config-only-if-stored") && r.getState() != Leader {
+		// Storing the entry failed: dispatchLogs answered the future with
+		// the error and stepped down. The configuration never reached the
+		// log, so it isn't this node's.
+		return
+	}
 	index := future.Index()
 	r.setLatestConfiguration(configuration, index)
 	r.leaderState.commitment.setConfiguration(configuration)

@@ -71,8 +71,15 @@ func membershipCluster(h *dsttest.Harness, loss bool) *simCluster {
 // loss: the sweep loses servers for good (Faults.Loss), which the
 // operator replaces.
 func membershipClusterWith(h *dsttest.Harness, defaultTimeouts, loss bool) *simCluster {
+	return membershipClusterSpec(h, loss, clusterSpec{defaultTimeouts: defaultTimeouts})
+}
+
+// membershipClusterSpec is membershipClusterWith with more of the spec
+// given (phase 3 forces TrailingLogs 0 on some seeds).
+func membershipClusterSpec(h *dsttest.Harness, loss bool, spec clusterSpec) *simCluster {
 	voters := []int{1, 3, 5, 7}[h.World().Rand().Stream("cluster size").IntN(4)]
-	c := newCluster(h, clusterSpec{voters: voters, spares: 3, operator: true, defaultTimeouts: defaultTimeouts, drawConfig: true, clients: 2})
+	spec.voters, spec.spares, spec.operator, spec.drawConfig, spec.clients = voters, 3, true, true, 2
+	c := newCluster(h, spec)
 	h.Expect("membership: AddNonvoter", "membership: AddVoter", "membership: DemoteVoter", "membership: RemoveServer",
 		"a removed server was shut down")
 	if loss {

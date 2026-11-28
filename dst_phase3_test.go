@@ -5,8 +5,9 @@ package raft
 // Phase 3 (DST.md 12): how useful plain exploration is. One combined
 // sweep, not one per fault class: every fault kind is enabled and the
 // swarm switches each off for some seeds, and each seed draws the
-// cluster's shape (a fixed cluster of 3, 4 or 5 voters, or a membership
-// cluster whose servers are lost and replaced). Every known bug (planted,
+// cluster's shape (half fixed clusters of 3, 4 or 5 voters, half
+// membership clusters whose servers are lost and replaced; TrailingLogs 0
+// on a quarter of seeds). Every known bug (planted,
 // or a real one with its fix switched off and the other fixes on) runs
 // through it until it has failed a few seeds or run out of seeds: the
 // result is whether plain exploration finds the bug, how soon (its first
@@ -49,13 +50,25 @@ const (
 func phase3Setup(h *dsttest.Harness) {
 	sw := h.Swarm()
 	gray := sw.SlowLinkShare > 0 || sw.LossyLinkShare > 0 || sw.SlowMachineShare > 0 || sw.SlowDiskShare > 0
-	switch shape := h.World().Rand().Stream("phase3 shape").IntN(4); shape {
-	case 0:
-		membershipClusterWith(h, gray, true)
-	default:
-		h.OnLoss(func(*dsttest.Machine) bool { return false }, nil) // a fixed cluster loses no server for good
-		newCluster(h, clusterSpec{voters: 2 + shape, defaultTimeouts: gray, drawConfig: true, clients: 2})
+	r := h.World().Rand().Stream("phase3 shape")
+	spec := clusterSpec{defaultTimeouts: gray}
+	// TrailingLogs 0 on a quarter of seeds: raft accepts it, and 6.11
+	// needs it; the drawn configuration only picks 32 or 4 (upstream's
+	// plain sweeps run without 6.11's fix).
+	if r.IntN(4) == 0 {
+		spec.forceTrailing, spec.forceTrailingLogs = true, 0
+		h.Sometimes("raft config: TrailingLogs 0")
 	}
+	h.Expect("raft config: TrailingLogs 0")
+	// Half the seeds are membership clusters (servers lost and replaced),
+	// half fixed clusters of 3, 4 or 5 voters.
+	if r.IntN(2) == 0 {
+		membershipClusterSpec(h, true, spec)
+		return
+	}
+	h.OnLoss(func(*dsttest.Machine) bool { return false }, nil) // a fixed cluster loses no server for good
+	spec.voters, spec.drawConfig, spec.clients = 3+r.IntN(3), true, 2
+	newCluster(h, spec)
 }
 
 // phase3Faults: every fault class, server loss included (only membership
@@ -226,4 +239,16 @@ func TestDSTPhase3(t *testing.T) {
 		fmt.Fprintln(f, line)
 		t.Log(line)
 	}
+}
+
+// TestDSTPhase3Sweep is the combined sweep as an ordinary dsttest run, with
+// every known fix on: replay one of its seeds with -dst.seed=N (-dst.v for
+// the event log).
+func TestDSTPhase3Sweep(t *testing.T) {
+	activeBug = knownFixes
+	if v := os.Getenv("DSTBUG"); v != "" {
+		activeBug = v // to replay a seed with other switches
+	}
+	defer func() { activeBug = "" }()
+	dsttest.Run(t, dsttest.Options{Seeds: 50, Faults: phase3Faults, FaultPhase: 10 * time.Second, RecoveryPhase: 10 * time.Second}, phase3Setup)
 }

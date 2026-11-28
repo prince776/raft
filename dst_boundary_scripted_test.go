@@ -602,3 +602,114 @@ func TestPipelineStall(t *testing.T) {
 		}
 	}
 }
+
+// failedConfigWrite runs three servers on raft's in-memory pieces, makes
+// the leader's log store fail the write of a DemoteVoter entry, and
+// returns the leader's latest configuration afterwards, and whether its
+// log holds any entry carrying that configuration (DST.md 6.18).
+func failedConfigWrite(t *testing.T) (latest Configuration, inLog bool) {
+	conf := inmemConfig(t)
+	var rafts []*Raft
+	var stores []*failOnceStore
+	var servers []Server
+	var trans []*InmemTransport
+	for i := 0; i < 3; i++ {
+		addr, tr := NewInmemTransport("")
+		trans = append(trans, tr)
+		servers = append(servers, Server{ID: ServerID(fmt.Sprintf("s%d", i)), Address: addr})
+	}
+	for i := range trans {
+		for j := range trans {
+			if i != j {
+				trans[i].Connect(servers[j].Address, trans[j])
+			}
+		}
+	}
+	for i := 0; i < 3; i++ {
+		c := *conf
+		c.LocalID = servers[i].ID
+		store := &failOnceStore{InmemStore: NewInmemStore()}
+		stores = append(stores, store)
+		snaps := NewInmemSnapshotStore()
+		if err := BootstrapCluster(&c, store, store, snaps, trans[i], Configuration{Servers: servers}); err != nil {
+			t.Fatal(err)
+		}
+		r, err := NewRaft(&c, &MockFSM{}, store, store, snaps, trans[i])
+		if err != nil {
+			t.Fatal(err)
+		}
+		rafts = append(rafts, r)
+	}
+	defer func() {
+		for _, r := range rafts {
+			r.Shutdown().Error()
+		}
+	}()
+	var leader *Raft
+	var li int
+	for k := 0; k < 300 && leader == nil; k++ {
+		time.Sleep(10 * time.Millisecond)
+		for i, r := range rafts {
+			if r.State() == Leader {
+				leader, li = r, i
+			}
+		}
+	}
+	if leader == nil {
+		t.Fatal("no leader")
+	}
+	if err := leader.Barrier(time.Second).Error(); err != nil {
+		t.Fatal(err)
+	}
+	victim := servers[(li+1)%3].ID
+	stores[li].armed.Store(true)
+	err := leader.DemoteVoter(victim, 0, time.Second).Error()
+	if err == nil || !stores[li].failed.Load() {
+		t.Fatalf("test setup: the demotion's write didn't fail (err %v)", err)
+	}
+	f := leader.GetConfiguration()
+	if err := f.Error(); err != nil {
+		t.Fatal(err)
+	}
+	latest = f.Configuration()
+	first, _ := stores[li].FirstIndex()
+	last, _ := stores[li].LastIndex()
+	for i := first; i <= last && i > 0; i++ {
+		var l Log
+		if stores[li].GetLog(i, &l) == nil && l.Type == LogConfiguration {
+			if c := DecodeConfiguration(l.Data); !hasVote(c, victim) {
+				inLog = true
+			}
+		}
+	}
+	return latest, inLog
+}
+
+// TestFailedConfigWrite (DST.md 6.18): a leader whose write of a
+// configuration entry fails steps down, but upstream keeps the new
+// configuration anyway, though no log holds it; with config-only-if-stored
+// it keeps the configuration its log holds.
+//
+// Fails if: upstream doesn't keep the phantom configuration (nothing to
+// show), or the fix keeps it.
+func TestFailedConfigWrite(t *testing.T) {
+	defer func() { activeBug = "" }()
+	activeBug = ""
+	latest, inLog := failedConfigWrite(t)
+	demoted := false
+	for _, s := range latest.Servers {
+		if s.Suffrage == Nonvoter {
+			demoted = true
+		}
+	}
+	if !demoted || inLog {
+		t.Errorf("upstream: expected the unstored demotion in the latest configuration and not in the log; latest %v, in log %v", latest.Servers, inLog)
+	}
+	activeBug = "config-only-if-stored"
+	latest, inLog = failedConfigWrite(t)
+	for _, s := range latest.Servers {
+		if s.Suffrage == Nonvoter && !inLog {
+			t.Errorf("with the fix: the latest configuration %v holds a demotion no log entry holds", latest.Servers)
+		}
+	}
+}

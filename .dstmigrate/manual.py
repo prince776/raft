@@ -691,3 +691,20 @@ func (n *NetworkTransport) putReader(r *bufio.Reader) {
 	defer n.putReader(r)''', 1)
     return imports(s, 'sync')
 edit('net_transport.go', bufreuse)
+
+# Experimental fix (DST.md 6.18): appendConfigurationEntry adopts the new
+# configuration after dispatchLogs even when storing it failed (dispatchLogs
+# then answers the future with the error and steps down to Follower). The
+# node keeps a configuration no log holds; once a later leader's entry fills
+# that index and commits, it is the node's committed configuration too.
+edit('raft.go', lambda s: s.replace('''	r.dispatchLogs([]*logFuture{&future.logFuture})
+	index := future.Index()
+	r.setLatestConfiguration(configuration, index)''', '''	r.dispatchLogs([]*logFuture{&future.logFuture})
+	if bug("config-only-if-stored") && r.getState() != Leader {
+		// Storing the entry failed: dispatchLogs answered the future with
+		// the error and stepped down. The configuration never reached the
+		// log, so it isn't this node's.
+		return
+	}
+	index := future.Index()
+	r.setLatestConfiguration(configuration, index)''', 1))

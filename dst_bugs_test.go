@@ -323,7 +323,7 @@ func TestDSTDiskErrorsFixed(t *testing.T) {
 }
 
 // knownFixes are the proposed fixes for the raft bugs found so far.
-const knownFixes = "candidate-check-unless-ahead,bootstrap-log-first,snapshot-boundary-fix,snapshot-fallback-needs-log,heartbeat-on-main-thread,transfer-send-stoppable,pipeline-close-on-abort,snapshot-install-rule7"
+const knownFixes = "candidate-check-unless-ahead,bootstrap-log-first,snapshot-boundary-fix,snapshot-fallback-needs-log,heartbeat-on-main-thread,transfer-send-stoppable,pipeline-close-on-abort,snapshot-install-rule7,config-only-if-stored"
 
 // TestDSTMembershipFixed: the membership sweep with servers lost for good
 // and replaced, with the proposed fixes on. Correct raft stalls on some
