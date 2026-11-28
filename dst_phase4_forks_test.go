@@ -13,7 +13,9 @@ package raft
 // default 1000).
 
 import (
+	"maps"
 	"os"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -104,6 +106,28 @@ func TestDSTPhase4Forks(t *testing.T) {
 	for _, k := range names {
 		a := by[k]
 		t.Logf("rarity: %-62.62s %4d runs: %.2f rare states per run, rarest reached by %.1f runs on average", k, a.runs, float64(a.rare)/float64(a.runs), float64(a.rarest)/float64(a.runs))
+	}
+	// Does each progress quantity predict failure? The failure rate among
+	// the tenth of runs that pushed it highest, against the overall rate
+	// (importance splitting needs a score failures are likelier after).
+	failed := 0
+	for _, r := range rep.Results {
+		if r.Err != nil {
+			failed++
+		}
+	}
+	for _, q := range slices.Sorted(maps.Keys(rep.Progress)) {
+		rs := slices.Clone(rep.Results)
+		sort.SliceStable(rs, func(i, j int) bool { return rs[i].ProgressMax[q] > rs[j].ProgressMax[q] })
+		top := rs[:len(rs)/10]
+		f := 0
+		for _, r := range top {
+			if r.Err != nil {
+				f++
+			}
+		}
+		t.Logf("progress: %-45s top tenth (>= %d) fail %d/%d (%.1f%%), overall %.1f%%", q, top[len(top)-1].ProgressMax[q], f, len(top),
+			100*float64(f)/float64(len(top)), 100*float64(failed)/float64(len(rep.Results)))
 	}
 	if os.Getenv("DST_PHASE4_NOFORK") == "1" {
 		return

@@ -1152,6 +1152,38 @@ the 1000 runs, per run: passing 0.43; 6.18 6.67 (rarest reached by 16 runs
 against 42); catches up 1.0; 6.13 0.30; the rest 0. Only 6.18's path is
 rare in this abstraction, which fits guided finding it early once.
 
+**Third measurement: progress quantities** (go-dst-kit d2ab93b,
+Harness.Progress; raft's commit lag, term spread and stress conditions at
+once, the three that predicted failure, 1.7-2.1x the base rate in the top
+tenth). 2000 guided runs, A; the run each kind first failed (plain from the
+second measurement, same seeds):
+
+| | Seed 1 plain | by progress | by states+progress | Seed 1001 plain | by progress | by states+progress |
+|---|---|---|---|---|---|---|
+| terms never go back (6.13) | 94 | 54 | 66 | 2 | 2 | 2 |
+| every member catches up | 179 | 222 | 339 | 127 | 215 | 215 |
+| members agree (6.18) | 780 | 297 | 1481 | 152 | 266 | 266 |
+| the cluster recovers | 295 | 549 | 549 | 221 | 425 | 425 |
+| "log not found" panic | 462 | 875 | 875 | 372 | 48 | 730 |
+| run never finishes | 576 | 1081 | 1081 | 1739 | - | - |
+| only voters are elected | - | - | - | 1873 | - | - |
+| panic in a raft goroutine | - | - | - | 1934 | - | - |
+| kinds | 6 | 6 | 6 | 8 | 5 | 5 |
+
+No gain again: two kinds sooner once (6.18 2.6x on seed 1, the panic 7.7x
+on seed 1001), the rest later, the late singletons missed. And climbing
+brought back the concentration: a climb renews its root's budget, so by
+progress forks came from 46-54 roots, one root forked 138-217 times, and
+"the cluster recovers" failed 94 and 191 times (forks of a few lineages).
+
+Phase 4 so far, three signal families (abstract states, root spread,
+progress): forking from a run heading for a bug works (30-100%), but no
+signal tried picks those runs before they fail better than 2x, and
+splitting can only gain what its score predicts while spending half the
+budget on forks. Plain swarm is the stronger hunter on these bugs, which
+agrees with Borgarelli et al. (random 11 bugs, RL 10) and with
+FoundationDB's and TigerBeetle's choice of volume, swarm and strong checks.
+
 ## 11. How to run
 
 The fork builds against a local go-dst-kit through a `go.work` (not

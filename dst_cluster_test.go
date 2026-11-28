@@ -136,13 +136,14 @@ type dstScenario struct{ noSync, splitBatches, naiveReadIndex bool }
 
 // simCluster is a simulated cluster: its nodes, and what runs on them.
 type simCluster struct {
-	h     *dsttest.Harness
-	spec  clusterSpec
-	nodes []*dstNode // the bootstrapped voters first, then the spares
-	kv    *kvWorkload
-	op    *operator  // nil unless spec.operator
-	knobs *raftKnobs // the drawn configuration (nil unless spec.drawConfig)
-	inv   *invariants
+	stress stress // progressChecks' state
+	h      *dsttest.Harness
+	spec   clusterSpec
+	nodes  []*dstNode // the bootstrapped voters first, then the spares
+	kv     *kvWorkload
+	op     *operator  // nil unless spec.operator
+	knobs  *raftKnobs // the drawn configuration (nil unless spec.drawConfig)
+	inv    *invariants
 	// recover: servers an operator recovers by hand at their next boot
 	// (RecoverCluster, as peers.json in Consul), with that configuration.
 	recover map[string]Configuration
@@ -249,6 +250,7 @@ func newCluster(h *dsttest.Harness, spec clusterSpec) *simCluster {
 	h.OnPanic(func(v any) bool { return diskError(fmt.Errorf("%v", v)) })
 	c.inv = newInvariants()
 	h.State(c.abstractState) // guided exploration's abstract state (dst_state_test.go)
+	c.progressChecks(h)      // and its progress quantities
 	c.checks()
 	if !spec.noWhiteBox {
 		c.invariantChecks()
