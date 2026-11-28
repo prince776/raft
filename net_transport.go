@@ -8,7 +8,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"github.com/prince776/go-dst-kit/realworld"
 	"io"
 	"net"
 	"os"
@@ -16,6 +15,7 @@ import (
 	"time"
 
 	"github.com/prince776/go-dst-kit/dst"
+	"github.com/prince776/go-dst-kit/realworld"
 
 	"github.com/hashicorp/go-hclog"
 	"github.com/hashicorp/go-metrics"
@@ -243,6 +243,11 @@ type netPipeline struct {
 func NewNetworkTransportWithConfig(
 	config *NetworkTransportConfig,
 ) *NetworkTransport {
+	w := config.World
+	if w == nil {
+		w = realworld.Default()
+	}
+
 	if config.Logger == nil {
 		config.Logger = hclog.New(&hclog.LoggerOptions{
 			Name:   "raft-net",
@@ -254,10 +259,6 @@ func NewNetworkTransportWithConfig(
 	if maxInFlight == 0 {
 		// Default zero value
 		maxInFlight = DefaultMaxRPCsInFlight
-	}
-	w := config.World
-	if w == nil {
-		w = realworld.Default()
 	}
 	trans := &NetworkTransport{
 		w:                       w,

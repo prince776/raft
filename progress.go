@@ -40,12 +40,12 @@ func startSnapshotRestoreMonitor(
 	ctx, cancel := dst.WithCancel(w, context.Background())
 
 	m := &snapshotRestoreMonitor{
+		w:               w,
 		logger:          logger,
 		cr:              cr,
 		size:            size,
 		networkTransfer: networkTransfer,
 		cancel:          cancel,
-		w:               w,
 		doneCh:          dst.MakeChan[struct{}](w, 0),
 	}
 	w.Go(func() { m.run(ctx) })

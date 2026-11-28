@@ -47,9 +47,9 @@ type saturationMetric struct {
 // number of previous measurements that will be used to smooth out spikes.
 func newSaturationMetric(w *dst.World, name []string, reportInterval time.Duration) *saturationMetric {
 	m := &saturationMetric{
+		w:              w,
 		reportInterval: reportInterval,
 		nowFn:          time.Now,
-		w:              w,
 		lastReport:     w.Now(),
 		reportFn:       func(sat float32) { metrics.AddSample(name, sat) },
 	}

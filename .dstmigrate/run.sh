@@ -16,7 +16,7 @@ for f in dst_*_test.go dst_test.go dst_maporder.go dstfix.go dstbugs.go dstbugs_
 rm -f dst_recv.go
 git checkout -q $BASE -- $(git ls-tree -r --name-only $BASE | grep '\.go$')
 GOTOOLCHAIN=go1.25.0 "$DSTMIGRATE" -tests -test-world 'github.com/prince776/go-dst-kit/realworld.Default()' -real-fs '*_test.go,peersjson.go,testing.go' \
-  -world 'Raft=$.w,raftState=$.w,NetworkTransport=$.w,netPipeline=$.trans.w,InmemTransport=$.w,inmemPipeline=$.trans.w,cluster=$.w,snapshotRestoreMonitor=$.w,deferError=$.w,followerReplication=$.w,saturationMetric=$.w,FileSnapshotStore=$.world(),FileSnapshotSink=$.store.world()' . 2>&1 | grep -v '^rewrote' || true
+  -world-param 'randomTimeout,generateUUID,emitLogStoreMetrics,newSaturationMetric,startSnapshotRestoreMonitor,fsmRestoreAndMeasure,snapshotName' -world-field 'Config.World,NetworkTransportConfig.World' -world 'InmemSnapshotStore=$.world(),Raft=$.w,raftState=$.w,NetworkTransport=$.w,netPipeline=$.trans.w,InmemTransport=$.w,inmemPipeline=$.trans.w,cluster=$.w,snapshotRestoreMonitor=$.w,deferError=$.w,followerReplication=$.w,saturationMetric=$.w,FileSnapshotStore=$.world(),FileSnapshotSink=$.store.world()' . 2>&1 | grep -v '^rewrote' || true
 python3 .dstmigrate/manual.py
 mv .dstmigrate/aside/*.go . 2>/dev/null || true
 gofmt -w $(git ls-files "*.go") dst_recv.go

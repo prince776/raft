@@ -58,32 +58,10 @@ def util(s):
 	return w.After(minVal + extra)
 }
 ''')
-    s = s.replace('func generateUUID() string {', 'func generateUUID(w *dst.World) string {').replace('__w.Rand().CryptoRead(buf)', 'w.Rand().CryptoRead(buf)')
     return s
 edit('util.go', util)
 
-for f in ['raft.go', 'replication.go', 'snapshot.go']:
-    edit(f, lambda s: s.replace('randomTimeout(r.config()', 'randomTimeout(r.w, r.config()')
-         .replace('randomTimeout(hbTimeout)', 'randomTimeout(r.w, hbTimeout)')
-         .replace('randomTimeout(electionTimeout)', 'randomTimeout(r.w, electionTimeout)'))
-edit('inmem_transport.go', lambda s: s.replace('ServerAddress(generateUUID())', 'ServerAddress(generateUUID(realworld.Default()))'))
-edit('util_test.go', lambda s: s.replace('randomTimeout(time.Millisecond)', 'randomTimeout(realworld.Default(), time.Millisecond)')
-     .replace('randomTimeout(0)', 'randomTimeout(realworld.Default(), 0)').replace('generateUUID()', 'generateUUID(realworld.Default())'))
-
-# NewRaft: the World from Config.World, else the real one.
-def newraft(s):
-    i = s.index('func NewRaft(conf *Config')
-    j = s.index('\n}\n', i)
-    b = s[i:j].replace('''	// Validate the configuration.''', '''	// The World raft runs in: the real one unless the config says.
-	w := conf.World
-	if w == nil {
-		w = realworld.Default()
-	}
-
-	// Validate the configuration.''', 1).replace('__w', 'w').replace('''	r.conf.Store(*conf)''', '''	r.w = w
-	r.conf.Store(*conf)''', 1)
-    return s[:i] + b + s[j:]
-edit('api.go', newraft)
+edit('inmem_transport.go', lambda s: s.replace('ServerAddress(generateUUID(__w))', 'ServerAddress(generateUUID(realworld.Default()))'))
 
 # Replace __w inside one function.
 def in_func(name, world):
@@ -109,66 +87,8 @@ func NewInmemTransportWithWorld(w *dst.World, addr ServerAddress, timeout time.D
 		consumerCh: dst.MakeChan[RPC](w, 16),''')
 edit('inmem_transport.go', inmem)
 
-def nettrans(s):
-    i, j = func_range(s, 'NewNetworkTransportWithConfig')
-    b = s[i:j].replace('__w', 'w').replace('''	trans := &NetworkTransport{''', '''	w := config.World
-	if w == nil {
-		w = realworld.Default()
-	}
-	trans := &NetworkTransport{
-		w:                       w,''', 1)
-    return s[:i] + b + s[j:]
-edit('net_transport.go', nettrans)
-
-# Metrics, the restore monitor, FSM restore: a World parameter.
-def logm(s):
-    s = s.replace('func emitLogStoreMetrics(s LogStore,', 'func emitLogStoreMetrics(w *dst.World, s LogStore,')
-    return in_func('emitLogStoreMetrics', 'w')(s)
-edit('log.go', logm)
-edit('raft.go', lambda s: s.replace('emitLogStoreMetrics(goArg', 'emitLogStoreMetrics(r.w, goArg')
-     .replace('startSnapshotRestoreMonitor(r.logger,', 'startSnapshotRestoreMonitor(r.w, r.logger,'))
-edit('log_test.go', lambda s: s.replace('emitLogStoreMetrics(s, ', 'emitLogStoreMetrics(realworld.Default(), s, '))
-
-def sat(s):
-    s = s.replace('func newSaturationMetric(name []string,', 'func newSaturationMetric(w *dst.World, name []string,')
-    s = in_func('newSaturationMetric', 'w')(s)
-    return s.replace('''		lastReport:     w.Now(),''', '''		w:              w,
-		lastReport:     w.Now(),''')
-edit('saturation.go', sat)
-edit('saturation_test.go', lambda s: s.replace('newSaturationMetric([]string', 'newSaturationMetric(realworld.Default(), []string'))
-
-def prog(s):
-    s = re.sub(r'func startSnapshotRestoreMonitor\(\n', 'func startSnapshotRestoreMonitor(\n\tw *dst.World,\n', s)
-    s = in_func('startSnapshotRestoreMonitor', 'w')(s)
-    return s.replace('''		doneCh:          dst.MakeChan[struct{}](w, 0),''', '''		w:               w,
-		doneCh:          dst.MakeChan[struct{}](w, 0),''')
-edit('progress.go', prog)
-
-def fsm(s):
-    s = s.replace('func fsmRestoreAndMeasure(logger hclog.Logger,', 'func fsmRestoreAndMeasure(w *dst.World, logger hclog.Logger,')
-    s = in_func('fsmRestoreAndMeasure', 'w')(s)
-    return (s.replace('startSnapshotRestoreMonitor(logger,', 'startSnapshotRestoreMonitor(w, logger,')
-             .replace('fsmRestoreAndMeasure(snapLogger, r.fsm,', 'fsmRestoreAndMeasure(r.w, snapLogger, r.fsm,')
-             .replace('newSaturationMetric([]string{"raft", "thread", "fsm"', 'newSaturationMetric(r.w, []string{"raft", "thread", "fsm"'))
-edit('fsm.go', fsm)
-edit('api.go', lambda s: s.replace('fsmRestoreAndMeasure(snapLogger, r.fsm,', 'fsmRestoreAndMeasure(r.w, snapLogger, r.fsm,')
-     .replace('newSaturationMetric([]string{"raft", "thread", "main"', 'newSaturationMetric(w, []string{"raft", "thread", "main"')
-     .replace('startSnapshotRestoreMonitor(snapLogger, crc,', 'startSnapshotRestoreMonitor(conf.worldOrReal(), snapLogger, crc,'))
-edit('config.go', lambda s: s + '''
-// worldOrReal is the config's World, or the real one.
-func (c *Config) worldOrReal() *dst.World {
-	if c.World != nil {
-		return c.World
-	}
-	return realworld.Default()
-}
-''')
-
 # Snapshot stores: a World for the snapshot's timestamp (real by default).
 def snapname(s):
-    s = s.replace('func snapshotName(term, index uint64) string {', 'func snapshotName(w *dst.World, term, index uint64) string {')
-    s = in_func('snapshotName', 'w')(s)
-    s = s.replace('	name := snapshotName(term, index)', '	name := snapshotName(f.world(), term, index)')
     i = s.index('type FileSnapshotStore struct {'); j = s.index('\n}\n', i)
     s = s[:i] + s[i:j] + '\n\n\tw *dst.World // nil: the real World' + s[j:]
     return imports(s, 'github.com/prince776/go-dst-kit/dst') + '''
@@ -210,7 +130,6 @@ func NewFileSnapshotStoreWithWorld(w *dst.World, base string, retain int, logger
     return s
 edit('file_snapshot.go', filesnapworld)
 def inmemsnap(s):
-    s = s.replace('	name := snapshotName(term, index)', '	name := snapshotName(m.world(), term, index)')
     i = s.index('type InmemSnapshotStore struct {'); j = s.index('\n}\n', i)
     s = s[:i] + s[i:j] + '\n\n\tw *dst.World // nil: the real World' + s[j:]
     return imports(s, 'github.com/prince776/go-dst-kit/dst') + '''
@@ -232,34 +151,6 @@ def cluster(s):
 		w:             w,
 		observationCh:''', 1)
 edit('testing.go', cluster)
-
-# Tests that build transports by struct literal: the real World.
-edit('inmem_transport_test.go', lambda s: s.replace('''	t1 := &InmemTransport{
-''', '''	t1 := &InmemTransport{
-		w: realworld.Default(),
-''').replace('''	t2 := &InmemTransport{
-''', '''	t2 := &InmemTransport{
-		w: realworld.Default(),
-'''))
-
-# More test literals of types holding a World.
-edit('net_transport_test.go', lambda s: s.replace('''	transport := NetworkTransport{
-''', '''	transport := NetworkTransport{
-		w:          realworld.Default(),
-'''))
-edit('raft_test.go', lambda s: s.replace('Raft{leaderState: leaderState{}', 'Raft{raftState: raftState{w: realworld.Default()}, leaderState: leaderState{}')
-     .replace('&followerReplication{nextIndex: idx}', '&followerReplication{w: realworld.Default(), nextIndex: idx}')
-     .replace('&followerReplication{}, stopCh', '&followerReplication{w: realworld.Default()}, stopCh')
-     .replace('''	r := &Raft{
-		trans:  transport,''', '''	r := &Raft{
-		raftState: raftState{w: realworld.Default()},
-		trans:     transport,'''))
-
-# The leader's per-follower replication state runs in the leader's World.
-edit('raft.go', lambda s: s.replace('''			s = &followerReplication{
-''', '''			s = &followerReplication{
-				w:                   r.w,
-''', 1))
 
 # Map iteration that starts goroutines or sends: an order from the World
 # (dst_maporder.go).

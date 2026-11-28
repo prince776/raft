@@ -13,7 +13,7 @@ import (
 )
 
 func TestInmemTransportImpl(t *testing.T) {
-	var inm interface{} = &InmemTransport{}
+	var inm interface{} = &InmemTransport{w: realworld.Default()}
 	if _, ok := inm.(Transport); !ok {
 		t.Fatalf("InmemTransport is not a Transport")
 	}

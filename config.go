@@ -5,7 +5,6 @@ package raft
 
 import (
 	"fmt"
-	"github.com/prince776/go-dst-kit/realworld"
 	"io"
 	"os"
 	"time"
@@ -398,12 +397,4 @@ func ValidateConfig(config *Config) error {
 		return fmt.Errorf("ElectionTimeout (%s) must be equal or greater than Heartbeat Timeout (%s)", config.ElectionTimeout, config.HeartbeatTimeout)
 	}
 	return nil
-}
-
-// worldOrReal is the config's World, or the real one.
-func (c *Config) worldOrReal() *dst.World {
-	if c.World != nil {
-		return c.World
-	}
-	return realworld.Default()
 }

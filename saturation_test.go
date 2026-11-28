@@ -4,10 +4,10 @@
 package raft
 
 import (
-	"github.com/prince776/go-dst-kit/realworld"
 	"testing"
 	"time"
 
+	"github.com/prince776/go-dst-kit/realworld"
 	"github.com/stretchr/testify/require"
 )
 

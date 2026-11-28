@@ -7,7 +7,6 @@ import (
 	"errors"
 	"fmt"
 	"github.com/prince776/go-dst-kit/dstbugs"
-	"github.com/prince776/go-dst-kit/realworld"
 	"io"
 	"strconv"
 	"sync/atomic"
@@ -16,6 +15,7 @@ import (
 	hclog "github.com/hashicorp/go-hclog"
 	metrics "github.com/hashicorp/go-metrics"
 	"github.com/prince776/go-dst-kit/dst"
+	"github.com/prince776/go-dst-kit/realworld"
 )
 
 const (
@@ -333,6 +333,11 @@ func BootstrapCluster(conf *Config, logs LogStore, stable StableStore,
 func RecoverCluster(conf *Config, fsm FSM, logs LogStore, stable StableStore,
 	snaps SnapshotStore, trans Transport, configuration Configuration,
 ) error {
+	w := conf.World
+	if w == nil {
+		w = realworld.Default()
+	}
+
 	// Validate the Raft server config.
 	if err := ValidateConfig(conf); err != nil {
 		return err
@@ -388,7 +393,7 @@ func RecoverCluster(conf *Config, fsm FSM, logs LogStore, stable StableStore,
 			"size-in-bytes", snapshot.Size,
 		)
 		crc := newCountingReadCloser(source)
-		monitor := startSnapshotRestoreMonitor(conf.worldOrReal(), snapLogger, crc, snapshot.Size, false)
+		monitor := startSnapshotRestoreMonitor(w, snapLogger, crc, snapshot.Size, false)
 		err = fsm.Restore(crc)
 		// Close the source after the restore has completed
 		_ = source.Close()
@@ -518,7 +523,6 @@ func HasExistingState(logs LogStore, stable StableStore, snaps SnapshotStore) (b
 // old state, such as snapshots, logs, peers, etc, all those will be restored
 // when creating the Raft node.
 func NewRaft(conf *Config, fsm FSM, logs LogStore, stable StableStore, snaps SnapshotStore, trans Transport) (*Raft, error) {
-	// The World raft runs in: the real one unless the config says.
 	w := conf.World
 	if w == nil {
 		w = realworld.Default()
@@ -575,6 +579,7 @@ func NewRaft(conf *Config, fsm FSM, logs LogStore, stable StableStore, snaps Sna
 	_, transportSupportPreVote := trans.(WithPreVote)
 	// Create Raft struct.
 	r := &Raft{
+		raftState:             raftState{w: w},
 		protocolVersion:       protocolVersion,
 		applyCh:               applyCh,
 		fsm:                   fsm,
@@ -610,7 +615,6 @@ func NewRaft(conf *Config, fsm FSM, logs LogStore, stable StableStore, snaps Sna
 		r.logger.Warn("pre-vote is disabled because it is not supported by the Transport")
 	}
 
-	r.w = w
 	r.conf.Store(*conf)
 
 	// Initialize as a follower.
