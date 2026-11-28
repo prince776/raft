@@ -1030,6 +1030,28 @@ bug needs. This run takes minutes.
 | real: stale-config stall (6.1), #696 stuck transfer (6.14), #697 rule 7 (6.17) | not found in 300–500 |
 | real: snapshot boundary (6.11) | not found in 500: it needs TrailingLogs 0, which the drawn configuration never uses (a gap in the world, not in exploration) |
 
+**The frozen baseline** (the mix above, plus TrailingLogs 0 on a quarter
+of seeds and membership clusters on half; each target to its 5th failure
+or 3000 seeds; seed 2399, an inconclusive linearizability check with every
+fix on, not counted as a detection):
+
+| Target | Plain: failing seeds / run (first) |
+|---|---|
+| compact-past-snapshot | 5 / 50 (1) |
+| nonvoter-can-lead | 5 / 950 (43) |
+| 6.18 phantom configuration | 5 / 650 (149) |
+| two-changes-in-flight | 3 / 3000 (719) |
+| config-change-before-noop | 1 / 3000 |
+| 6.1 stale-config stall | 1 / 3000 (2170) |
+| 6.14 #696 stuck transfer | 1 / 3000 (1906) |
+| commit-previous-term | 0 / 3000 |
+| 6.11 snapshot boundary | 0 / 3000 |
+| 6.17 #697 rule 7 | 0 / 3000 |
+
+Harness gap found by it: "membership changes are linearizable" can run out
+of search budget (seed 2399), a verdict-less failure; the tally now counts
+it apart. Todo: the same sound reductions the KV check got.
+
 So plain exploration finds the shallow planted bugs at once, and the
 membership and snapshot ones rarely (1 in 300–500 seeds). It finds
 only 4 of the 8 real bugs within 500 seeds, while dedicated per-class

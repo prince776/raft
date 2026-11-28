@@ -198,6 +198,12 @@ func TestDSTPhase3(t *testing.T) {
 				never[n] = true
 			}
 			for _, r := range rep.Failed {
+				if strings.Contains(r.Err.Error(), "linearizability inconclusive") {
+					// The checker ran out of search budget: no verdict, so
+					// neither a detection nor a pass (DST.md 10b).
+					why["inconclusive (no verdict)"]++
+					continue
+				}
 				failed++
 				why[phase3Why(r.Err)]++
 				if first == 0 || r.Seed < first {
