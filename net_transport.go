@@ -11,6 +11,7 @@ import (
 	"io"
 	"net"
 	"os"
+	"sync"
 	"time"
 
 	"github.com/prince776/go-dst-kit/dst"
@@ -80,6 +81,9 @@ var (
 // the entire state. That socket is not re-used as the connection state
 // is not known if there is an error.
 type NetworkTransport struct {
+	bufMu   sync.Mutex //dst:ok a plain lock: no scheduling point, see spareReader
+	readers []*bufio.Reader
+
 	connPool     map[ServerAddress][]*netConn
 	connPoolLock dst.Mutex
 
@@ -199,6 +203,27 @@ type netConn struct {
 
 func (n *netConn) Release() error {
 	return n.conn.Close()
+}
+
+// spareReader returns a receive buffer of connReceiveBufferSize on conn,
+// reusing one a closed connection gave back (Reset, so it behaves as new).
+func (n *NetworkTransport) spareReader(conn net.Conn) *bufio.Reader {
+	n.bufMu.Lock()
+	defer n.bufMu.Unlock()
+	if k := len(n.readers); k > 0 {
+		r := n.readers[k-1]
+		n.readers = n.readers[:k-1]
+		r.Reset(conn)
+		return r
+	}
+	return bufio.NewReaderSize(conn, connReceiveBufferSize)
+}
+
+func (n *NetworkTransport) putReader(r *bufio.Reader) {
+	r.Reset(nil)
+	n.bufMu.Lock()
+	n.readers = append(n.readers, r)
+	n.bufMu.Unlock()
 }
 
 type netPipeline struct {
@@ -636,7 +661,8 @@ func (n *NetworkTransport) listen() {
 // closed.
 func (n *NetworkTransport) handleConn(connCtx context.Context, conn net.Conn) {
 	defer func() { _ = conn.Close() }()
-	r := bufio.NewReaderSize(conn, connReceiveBufferSize)
+	r := n.spareReader(conn)
+	defer n.putReader(r)
 	w := bufio.NewWriter(conn)
 	dec := codec.NewDecoder(r, &codec.MsgpackHandle{})
 

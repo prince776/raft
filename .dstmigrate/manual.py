@@ -640,3 +640,54 @@ edit('raft.go', in_func('func (r *Raft) installSnapshot(', '''	// Clear old logs
 	}
 	// Clear old logs if r.logs is a MonotonicLogStore. Otherwise compact the
 	// logs. In both cases, log any errors and continue.'''))
+
+# Simulation speed (go-dst-kit performance pass): each accepted connection
+# used to allocate a fresh 256KB bufio reader. Connections churn far more in
+# a simulation (every crash, reset and partition redials), and zeroing and
+# returning those buffers to the OS took a large share of the CPU. The
+# transport keeps the readers of closed connections and Resets them onto new
+# ones: a Reset reader behaves exactly as a new one, so no run changes. Only
+# the server's reader: one goroutine (handleConn) owns it for the whole
+# connection. Not the client's writer: a pipeline can Release its connection
+# while another goroutine is still writing through it. The list is per
+# transport (one node), never process-wide, so nothing crosses seeds. A plain
+# mutex: no scheduling point is added.
+def bufreuse(s):
+    s = s.replace('''type NetworkTransport struct {
+	connPool     map[ServerAddress][]*netConn''', '''type NetworkTransport struct {
+	bufMu   sync.Mutex //dst:ok a plain lock: no scheduling point, see spareReader
+	readers []*bufio.Reader
+
+	connPool     map[ServerAddress][]*netConn''', 1)
+    s = s.replace('''func (n *netConn) Release() error {
+	return n.conn.Close()
+}''', '''func (n *netConn) Release() error {
+	return n.conn.Close()
+}
+
+// spareReader returns a receive buffer of connReceiveBufferSize on conn,
+// reusing one a closed connection gave back (Reset, so it behaves as new).
+func (n *NetworkTransport) spareReader(conn net.Conn) *bufio.Reader {
+	n.bufMu.Lock()
+	defer n.bufMu.Unlock()
+	if k := len(n.readers); k > 0 {
+		r := n.readers[k-1]
+		n.readers = n.readers[:k-1]
+		r.Reset(conn)
+		return r
+	}
+	return bufio.NewReaderSize(conn, connReceiveBufferSize)
+}
+
+func (n *NetworkTransport) putReader(r *bufio.Reader) {
+	r.Reset(nil)
+	n.bufMu.Lock()
+	n.readers = append(n.readers, r)
+	n.bufMu.Unlock()
+}''', 1)
+    s = s.replace('''	defer func() { _ = conn.Close() }()
+	r := bufio.NewReaderSize(conn, connReceiveBufferSize)''', '''	defer func() { _ = conn.Close() }()
+	r := n.spareReader(conn)
+	defer n.putReader(r)''', 1)
+    return imports(s, 'sync')
+edit('net_transport.go', bufreuse)
