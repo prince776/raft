@@ -959,6 +959,15 @@ their state machines, as the doc warns (1 of 50 seeds). And a recovery
 reuses terms (6.15), so the checks with history (one leader per term,
 logs match) start afresh at a manual recovery.
 
+### Step 5b: a lease read (not built, by decision)
+
+Prince's decision (2026-11-28): skip it. hashicorp/raft has no lease
+reads (VerifyLeader runs a round of heartbeats), so a lease-read check
+would test a planted feature, not raft; and the simulated clock can't
+break a lease anyway (drift is capped, and the jumps that would need a
+wall clock moving apart from the monotonic one aren't modelled). Clock
+jumps went on go-dst-kit's Todo instead. Phase 2 is closed.
+
 ## 11. How to run
 
 The fork builds against a local go-dst-kit through a `go.work` (not
