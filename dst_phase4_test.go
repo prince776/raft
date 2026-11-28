@@ -37,7 +37,7 @@ func TestDSTPhase4(t *testing.T) {
 	if os.Getenv("DST_PHASE4") != "1" {
 		t.Skip("phase 4 measurement: set DST_PHASE4=1")
 	}
-	defer func() { activeBug = "" }()
+	defer setSwitches("")
 	n := 500
 	if v, err := strconv.Atoi(os.Getenv("DST_PHASE4_RUNS")); err == nil && v > 0 {
 		n = v
@@ -54,7 +54,7 @@ func TestDSTPhase4(t *testing.T) {
 		if pick := os.Getenv("DST_PHASE4_BENCH"); pick != "" && !strings.HasPrefix(b.name, pick) {
 			continue
 		}
-		activeBug = b.switches
+		setSwitches(b.switches)
 		o := dsttest.Options{Faults: phase3Faults, FaultPhase: 10 * time.Second, RecoveryPhase: 10 * time.Second,
 			FirstSeed: first, Seeds: n, Explore: n, KeepGoing: true, DeterminismChecks: -1}
 		arms := []string{"plain", "guided"}

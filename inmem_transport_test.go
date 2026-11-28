@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/prince776/go-dst-kit/dst"
+	"github.com/prince776/go-dst-kit/realworld"
 	"github.com/stretchr/testify/require"
 )
 
@@ -31,15 +32,15 @@ func TestInmemTransportWriteTimeout(t *testing.T) {
 	// without having to contrive to fill up the buffer first.
 	timeout := 10 * time.Millisecond
 	t1 := &InmemTransport{
-		w:          theRealWorld(),
-		consumerCh: dst.MakeChan[RPC](theRealWorld(), 0),
+		w:          realworld.Default(),
+		consumerCh: dst.MakeChan[RPC](realworld.Default(), 0),
 		localAddr:  NewInmemAddr(),
 		peers:      make(map[ServerAddress]*InmemTransport),
 		timeout:    timeout,
 	}
 	t2 := &InmemTransport{
-		w:          theRealWorld(),
-		consumerCh: dst.MakeChan[RPC](theRealWorld(), 0),
+		w:          realworld.Default(),
+		consumerCh: dst.MakeChan[RPC](realworld.Default(), 0),
 		localAddr:  NewInmemAddr(),
 		peers:      make(map[ServerAddress]*InmemTransport),
 		timeout:    timeout,
@@ -47,16 +48,16 @@ func TestInmemTransportWriteTimeout(t *testing.T) {
 	a2 := t2.LocalAddr()
 	t1.Connect(a2, t2)
 
-	stop := dst.MakeChan[struct{}](theRealWorld(), 0)
-	stopped := dst.MakeChan[struct{}](theRealWorld(), 0)
-	theRealWorld().Go(func() {
+	stop := dst.MakeChan[struct{}](realworld.Default(), 0)
+	stopped := dst.MakeChan[struct{}](realworld.Default(), 0)
+	realworld.Default().Go(func() {
 		defer stopped.Close()
 		var i uint64
 		for {
 			{
 				var sel1 int
 				var sel1v2 RPC
-				dst.Select(theRealWorld(),
+				dst.Select(realworld.Default(),
 					dst.OnRecv(stop, func(_ struct{}, _ bool) { sel1 = 1 }),
 					dst.OnRecv(t2.Consumer(), func(v RPC, _ bool) { sel1 = 2; sel1v2 = v }),
 				)
@@ -87,9 +88,9 @@ func TestInmemTransportWriteTimeout(t *testing.T) {
 	stop.Close()
 	{
 		var sel2 int
-		dst.Select(theRealWorld(),
+		dst.Select(realworld.Default(),
 			dst.OnRecv(stopped, func(_ struct{}, _ bool) { sel2 = 1 }),
-			dst.OnRecv(theRealWorld().After(time.Second), func(_ time.Time, _ bool) { sel2 = 2 }),
+			dst.OnRecv(realworld.Default().After(time.Second), func(_ time.Time, _ bool) { sel2 = 2 }),
 		)
 		switch sel2 {
 		case 1:

@@ -5,6 +5,7 @@ package raft
 
 import (
 	"fmt"
+	"github.com/prince776/go-dst-kit/realworld"
 	"io"
 	"time"
 
@@ -14,7 +15,7 @@ import (
 // NewInmemAddr returns a new in-memory addr with
 // a randomly generate UUID as the ID.
 func NewInmemAddr() ServerAddress {
-	return ServerAddress(generateUUID(theRealWorld()))
+	return ServerAddress(generateUUID(realworld.Default()))
 }
 
 // inmemPipeline is used to pipeline requests for the in-mem transport.
@@ -54,7 +55,7 @@ type InmemTransport struct {
 // will be used to decide how long to wait for a connected peer to process the
 // RPCs that we're sending it. See also Connect() and Consumer().
 func NewInmemTransportWithTimeout(addr ServerAddress, timeout time.Duration) (ServerAddress, *InmemTransport) {
-	return NewInmemTransportWithWorld(theRealWorld(), addr, timeout)
+	return NewInmemTransportWithWorld(realworld.Default(), addr, timeout)
 }
 
 // NewInmemTransportWithWorld is NewInmemTransportWithTimeout in the World w.

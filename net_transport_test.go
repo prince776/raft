@@ -16,6 +16,7 @@ import (
 
 	"github.com/hashicorp/go-hclog"
 	"github.com/prince776/go-dst-kit/dst"
+	"github.com/prince776/go-dst-kit/realworld"
 	"github.com/stretchr/testify/require"
 )
 
@@ -61,17 +62,17 @@ func TestNetworkTransport_CloseStreams(t *testing.T) {
 	// errCh is used to report errors from any of the goroutines
 	// created in this test.
 	// It is buffered as to not block.
-	errCh := dst.MakeChan[error](theRealWorld(), 100)
+	errCh := dst.MakeChan[error](realworld.Default(), 100)
 
 	// Listen for a request
-	theRealWorld().Go(func() {
+	realworld.Default().Go(func() {
 		for {
 			{
 				var sel1 int
 				var sel1v1 RPC
-				dst.Select(theRealWorld(),
+				dst.Select(realworld.Default(),
 					dst.OnRecv(rpcCh, func(v RPC, _ bool) { sel1 = 1; sel1v1 = v }),
-					dst.OnRecv(theRealWorld().After(200*time.Millisecond), func(_ time.Time, _ bool) { sel1 = 2 }),
+					dst.OnRecv(realworld.Default().After(200*time.Millisecond), func(_ time.Time, _ bool) { sel1 = 2 }),
 				)
 				switch sel1 {
 				case 1:
@@ -107,7 +108,7 @@ func TestNetworkTransport_CloseStreams(t *testing.T) {
 		// Try to do parallel appends, should stress the conn pool
 		for i = 0; i < 5; i++ {
 			wg.Add(1)
-			theRealWorld().Go(func() {
+			realworld.Default().Go(func() {
 				defer wg.Done()
 				var out AppendEntriesResponse
 				if err := trans2.AppendEntries("id1", trans1.LocalAddr(), &args, &out); err != nil {
@@ -252,13 +253,13 @@ func TestNetworkTransport_AppendEntries(t *testing.T) {
 		resp := makeAppendRPCResponse()
 
 		// Listen for a request
-		theRealWorld().Go(func() {
+		realworld.Default().Go(func() {
 			{
 				var sel2 int
 				var sel2v1 RPC
-				dst.Select(theRealWorld(),
+				dst.Select(realworld.Default(),
 					dst.OnRecv(rpcCh, func(v RPC, _ bool) { sel2 = 1; sel2v1 = v }),
-					dst.OnRecv(theRealWorld().After(200*time.Millisecond), func(_ time.Time, _ bool) { sel2 = 2 }),
+					dst.OnRecv(realworld.Default().After(200*time.Millisecond), func(_ time.Time, _ bool) { sel2 = 2 }),
 				)
 				switch sel2 {
 				case 1:
@@ -315,14 +316,14 @@ func TestNetworkTransport_AppendEntriesPipeline(t *testing.T) {
 		resp := makeAppendRPCResponse()
 
 		// Listen for a request
-		theRealWorld().Go(func() {
+		realworld.Default().Go(func() {
 			for i := 0; i < 10; i++ {
 				{
 					var sel3 int
 					var sel3v1 RPC
-					dst.Select(theRealWorld(),
+					dst.Select(realworld.Default(),
 						dst.OnRecv(rpcCh, func(v RPC, _ bool) { sel3 = 1; sel3v1 = v }),
-						dst.OnRecv(theRealWorld().After(200*time.Millisecond), func(_ time.Time, _ bool) { sel3 = 2 }),
+						dst.OnRecv(realworld.Default().After(200*time.Millisecond), func(_ time.Time, _ bool) { sel3 = 2 }),
 					)
 					switch sel3 {
 					case 1:
@@ -368,9 +369,9 @@ func TestNetworkTransport_AppendEntriesPipeline(t *testing.T) {
 			{
 				var sel4 int
 				var sel4v1 AppendFuture
-				dst.Select(theRealWorld(),
+				dst.Select(realworld.Default(),
 					dst.OnRecv(respCh, func(v AppendFuture, _ bool) { sel4 = 1; sel4v1 = v }),
-					dst.OnRecv(theRealWorld().After(200*time.Millisecond), func(_ time.Time, _ bool) { sel4 = 2 }),
+					dst.OnRecv(realworld.Default().After(200*time.Millisecond), func(_ time.Time, _ bool) { sel4 = 2 }),
 				)
 				switch sel4 {
 				case 1:
@@ -404,16 +405,16 @@ func TestNetworkTransport_AppendEntriesPipeline_CloseStreams(t *testing.T) {
 	args := makeAppendRPC()
 	resp := makeAppendRPCResponse()
 
-	shutdownCh := dst.MakeChan[struct{}](theRealWorld(), 0)
+	shutdownCh := dst.MakeChan[struct{}](realworld.Default(), 0)
 	defer shutdownCh.Close()
 
 	// Listen for a request
-	theRealWorld().Go(func() {
+	realworld.Default().Go(func() {
 		for {
 			{
 				var sel5 int
 				var sel5v1 RPC
-				dst.Select(theRealWorld(),
+				dst.Select(realworld.Default(),
 					dst.OnRecv(rpcCh, func(v RPC, _ bool) { sel5 = 1; sel5v1 = v }),
 					dst.OnRecv(shutdownCh, func(_ struct{}, _ bool) { sel5 = 2 }),
 				)
@@ -454,7 +455,7 @@ func TestNetworkTransport_AppendEntriesPipeline_CloseStreams(t *testing.T) {
 			// On the last one, close the streams on the transport one.
 			if cancelStreams && i == 10 {
 				trans1.CloseStreams()
-				theRealWorld().Sleep(10 * time.Millisecond)
+				realworld.Default().Sleep(10 * time.Millisecond)
 			}
 
 			out := new(AppendEntriesResponse)
@@ -470,9 +471,9 @@ func TestNetworkTransport_AppendEntriesPipeline_CloseStreams(t *testing.T) {
 			{
 				var sel6 int
 				var sel6v1 AppendFuture
-				dst.Select(theRealWorld(),
+				dst.Select(realworld.Default(),
 					dst.OnRecv(respCh, func(v AppendFuture, _ bool) { sel6 = 1; sel6v1 = v }),
-					dst.OnRecv(theRealWorld().After(200*time.Millisecond), func(_ time.Time, _ bool) { sel6 = 2 }),
+					dst.OnRecv(realworld.Default().After(200*time.Millisecond), func(_ time.Time, _ bool) { sel6 = 2 }),
 				)
 				switch sel6 {
 				case 1:
@@ -526,7 +527,7 @@ func TestNetworkTransport_AppendEntriesPipeline_MaxRPCsInFlight(t *testing.T) {
 			args := makeAppendRPC()
 			resp := makeAppendRPCResponse()
 
-			ctx, cancel := dst.WithTimeout(theRealWorld(), context.Background(), 5*time.Second)
+			ctx, cancel := dst.WithTimeout(realworld.Default(), context.Background(), 5*time.Second)
 			defer cancel()
 
 			// Transport 2 makes outbound request
@@ -537,7 +538,7 @@ func TestNetworkTransport_AppendEntriesPipeline_MaxRPCsInFlight(t *testing.T) {
 
 			// Kill the transports on the timeout to unblock. That means things that
 			// shouldn't have blocked did block.
-			theRealWorld().Go(func() {
+			realworld.Default().Go(func() {
 				<-ctx.Done()
 				_ = trans2.Close()
 				_ = trans1.Close()
@@ -569,8 +570,8 @@ func TestNetworkTransport_AppendEntriesPipeline_MaxRPCsInFlight(t *testing.T) {
 			}
 
 			// Verify the next send blocks without blocking test forever
-			errCh := dst.MakeChan[error](theRealWorld(), 1)
-			theRealWorld().Go(func() {
+			errCh := dst.MakeChan[error](realworld.Default(), 1)
+			realworld.Default().Go(func() {
 				out := new(AppendEntriesResponse)
 				_, err := pipeline.AppendEntries(&args, out)
 				errCh.Send(err)
@@ -579,9 +580,9 @@ func TestNetworkTransport_AppendEntriesPipeline_MaxRPCsInFlight(t *testing.T) {
 			{
 				var sel7 int
 				var sel7v1 error
-				dst.Select(theRealWorld(),
+				dst.Select(realworld.Default(),
 					dst.OnRecv(errCh, func(v error, _ bool) { sel7 = 1; sel7v1 = v }),
-					dst.OnRecv(theRealWorld().After(50*time.Millisecond), func(_ time.Time, _ bool) { sel7 = 2 }),
+					dst.OnRecv(realworld.Default().After(50*time.Millisecond), func(_ time.Time, _ bool) { sel7 = 2 }),
 				)
 				switch sel7 {
 				case 1:
@@ -606,9 +607,9 @@ func TestNetworkTransport_AppendEntriesPipeline_MaxRPCsInFlight(t *testing.T) {
 			// The last append should unblock once the response is received.
 			{
 				var sel8 int
-				dst.Select(theRealWorld(),
+				dst.Select(realworld.Default(),
 					dst.OnRecv(errCh, func(_ error, _ bool) { sel8 = 1 }),
-					dst.OnRecv(theRealWorld().After(50*time.Millisecond), func(_ time.Time, _ bool) { sel8 = 2 }),
+					dst.OnRecv(realworld.Default().After(50*time.Millisecond), func(_ time.Time, _ bool) { sel8 = 2 }),
 				)
 				switch sel8 {
 				case 1:
@@ -647,13 +648,13 @@ func TestNetworkTransport_RequestVote(t *testing.T) {
 		}
 
 		// Listen for a request
-		theRealWorld().Go(func() {
+		realworld.Default().Go(func() {
 			{
 				var sel9 int
 				var sel9v1 RPC
-				dst.Select(theRealWorld(),
+				dst.Select(realworld.Default(),
 					dst.OnRecv(rpcCh, func(v RPC, _ bool) { sel9 = 1; sel9v1 = v }),
-					dst.OnRecv(theRealWorld().After(200*time.Millisecond), func(_ time.Time, _ bool) { sel9 = 2 }),
+					dst.OnRecv(realworld.Default().After(200*time.Millisecond), func(_ time.Time, _ bool) { sel9 = 2 }),
 				)
 				switch sel9 {
 				case 1:
@@ -721,13 +722,13 @@ func TestNetworkTransport_InstallSnapshot(t *testing.T) {
 		}
 
 		// Listen for a request
-		theRealWorld().Go(func() {
+		realworld.Default().Go(func() {
 			{
 				var sel10 int
 				var sel10v1 RPC
-				dst.Select(theRealWorld(),
+				dst.Select(realworld.Default(),
 					dst.OnRecv(rpcCh, func(v RPC, _ bool) { sel10 = 1; sel10v1 = v }),
-					dst.OnRecv(theRealWorld().After(200*time.Millisecond), func(_ time.Time, _ bool) { sel10 = 2 }),
+					dst.OnRecv(realworld.Default().After(200*time.Millisecond), func(_ time.Time, _ bool) { sel10 = 2 }),
 				)
 				switch sel10 {
 				case 1:
@@ -850,17 +851,17 @@ func TestNetworkTransport_PooledConn(t *testing.T) {
 	// errCh is used to report errors from any of the goroutines
 	// created in this test.
 	// It is buffered as to not block.
-	errCh := dst.MakeChan[error](theRealWorld(), 100)
+	errCh := dst.MakeChan[error](realworld.Default(), 100)
 
 	// Listen for a request
-	theRealWorld().Go(func() {
+	realworld.Default().Go(func() {
 		for {
 			{
 				var sel11 int
 				var sel11v1 RPC
-				dst.Select(theRealWorld(),
+				dst.Select(realworld.Default(),
 					dst.OnRecv(rpcCh, func(v RPC, _ bool) { sel11 = 1; sel11v1 = v }),
-					dst.OnRecv(theRealWorld().After(200*time.Millisecond), func(_ time.Time, _ bool) { sel11 = 2 }),
+					dst.OnRecv(realworld.Default().After(200*time.Millisecond), func(_ time.Time, _ bool) { sel11 = 2 }),
 				)
 				switch sel11 {
 				case 1:
@@ -896,7 +897,7 @@ func TestNetworkTransport_PooledConn(t *testing.T) {
 	for i := 0; i < 5; i++ {
 		wg.Add(1)
 
-		theRealWorld().Go(func() {
+		realworld.Default().Go(func() {
 			defer wg.Done()
 			var out AppendEntriesResponse
 			if err := trans2.AppendEntries("id1", trans1.LocalAddr(), &args, &out); err != nil {
@@ -996,28 +997,28 @@ func TestNetworkTransport_ListenBackoff(t *testing.T) {
 		Level:  hclog.DefaultLevel,
 	})
 	transport := NetworkTransport{
-		w:          theRealWorld(),
+		w:          realworld.Default(),
 		logger:     countingLogger,
 		stream:     testCountingStreamLayer{&numAccepts},
-		shutdownCh: dst.MakeChan[struct{}](theRealWorld(), 0),
+		shutdownCh: dst.MakeChan[struct{}](realworld.Default(), 0),
 	}
 
 	{
 		goArg8 := transport.listen
-		theRealWorld().Go(func() { goArg8() })
+		realworld.Default().Go(func() { goArg8() })
 	}
 
 	// sleep (+yield) for testTime seconds before asking the accept loop to shut down
-	theRealWorld().Sleep(testTime)
+	realworld.Default().Sleep(testTime)
 	_ = transport.Close()
 
 	// Verify that the method exited (but without block this test)
 	// maxDelay == 1s, so we will give the routine 1.25s to loop around and shut down.
 	{
 		var sel12 int
-		dst.Select(theRealWorld(),
+		dst.Select(realworld.Default(),
 			dst.OnRecv(transport.shutdownCh, func(_ struct{}, _ bool) { sel12 = 1 }),
-			dst.OnRecv(theRealWorld().After(1250*time.Millisecond), func(_ time.Time, _ bool) { sel12 = 2 }),
+			dst.OnRecv(realworld.Default().After(1250*time.Millisecond), func(_ time.Time, _ bool) { sel12 = 2 }),
 		)
 		switch sel12 {
 		case 1:

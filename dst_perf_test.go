@@ -51,8 +51,8 @@ func TestDSTPerfBaseline(t *testing.T) {
 	if out == "" {
 		t.Skip("set DST_PERF_OUT")
 	}
-	defer func() { activeBug = "" }()
-	activeBug = knownFixes
+	defer setSwitches("")
+	setSwitches(knownFixes)
 	f, err := os.Create(out)
 	if err != nil {
 		t.Fatal(err)

@@ -235,7 +235,7 @@ func TestRaft_RecoverCluster(t *testing.T) {
 			c.fsms[i] = r2.fsm.(*MockFSM)
 		}
 		c.FullyConnect()
-		theRealWorld().Sleep(c.propagateTimeout * 3)
+		realworld.Default().Sleep(c.propagateTimeout * 3)
 
 		// Let things settle and make sure we recovered.
 		c.EnsureLeader(t, c.Leader().localAddr)
@@ -306,9 +306,9 @@ func TestRaft_SingleNode(t *testing.T) {
 	{
 		var sel1 int
 		var sel1v1 bool
-		dst.Select(theRealWorld(),
+		dst.Select(realworld.Default(),
 			dst.OnRecv(raft.LeaderCh(), func(v bool, _ bool) { sel1 = 1; sel1v1 = v }),
-			dst.OnRecv(theRealWorld().After(conf.HeartbeatTimeout*3), func(_ time.Time, _ bool) { sel1 = 2 }),
+			dst.OnRecv(realworld.Default().After(conf.HeartbeatTimeout*3), func(_ time.Time, _ bool) { sel1 = 2 }),
 		)
 		switch sel1 {
 		case 1:
@@ -390,9 +390,9 @@ func TestRaft_LeaderFail(t *testing.T) {
 	c.Disconnect(leader.localAddr)
 
 	// Wait for new leader
-	limit := theRealWorld().Now().Add(c.longstopTimeout)
+	limit := realworld.Default().Now().Add(c.longstopTimeout)
 	var newLead *Raft
-	for theRealWorld().Now().Before(limit) && newLead == nil {
+	for realworld.Default().Now().Before(limit) && newLead == nil {
 		c.WaitEvent(nil, c.conf.CommitTimeout)
 		leaders := c.GetInState(Leader)
 		if len(leaders) == 1 && leaders[0] != leader {
@@ -540,22 +540,22 @@ func TestRaft_ApplyConcurrent(t *testing.T) {
 	for i := 0; i < sz; i++ {
 		{
 			goArg9 := i
-			theRealWorld().Go(func() { applyF(goArg9) })
+			realworld.Default().Go(func() { applyF(goArg9) })
 		}
 	}
 
 	// Wait to finish
-	doneCh := dst.MakeChan[struct{}](theRealWorld(), 0)
-	theRealWorld().Go(func() {
+	doneCh := dst.MakeChan[struct{}](realworld.Default(), 0)
+	realworld.Default().Go(func() {
 		group.Wait()
 		doneCh.Close()
 	})
 
 	{
 		var sel2 int
-		dst.Select(theRealWorld(),
+		dst.Select(realworld.Default(),
 			dst.OnRecv(doneCh, func(_ struct{}, _ bool) { sel2 = 1 }),
-			dst.OnRecv(theRealWorld().After(c.longstopTimeout), func(_ time.Time, _ bool) { sel2 = 2 }),
+			dst.OnRecv(realworld.Default().After(c.longstopTimeout), func(_ time.Time, _ bool) { sel2 = 2 }),
 		)
 		switch sel2 {
 		case 1:
@@ -595,7 +595,7 @@ func TestRaft_ApplyConcurrent_Timeout(t *testing.T) {
 			goArg10 :=
 
 				i
-			theRealWorld().Go(func() {
+			realworld.Default().Go(func() {
 				func(i int) {
 					future := leader.Apply([]byte(fmt.Sprintf("test%d", i)), time.Microsecond)
 					if future.Error() == ErrEnqueueTimeout {
@@ -613,8 +613,8 @@ func TestRaft_ApplyConcurrent_Timeout(t *testing.T) {
 	}
 
 	// Loop until we see a timeout, or give up.
-	limit := theRealWorld().Now().Add(c.longstopTimeout)
-	for theRealWorld().Now().Before(limit) {
+	limit := realworld.Default().Now().Add(c.longstopTimeout)
+	for realworld.Default().Now().Before(limit) {
 		if atomic.LoadInt32(&didTimeout) != 0 {
 			return
 		}
@@ -731,9 +731,9 @@ func TestRaft_RemoveFollower(t *testing.T) {
 	leader := c.Leader()
 
 	// Wait until we have 2 followers
-	limit := theRealWorld().Now().Add(c.longstopTimeout)
+	limit := realworld.Default().Now().Add(c.longstopTimeout)
 	var followers []*Raft
-	for theRealWorld().Now().Before(limit) && len(followers) != 2 {
+	for realworld.Default().Now().Before(limit) && len(followers) != 2 {
 		c.WaitEvent(nil, c.conf.CommitTimeout)
 		followers = c.GetInState(Follower)
 	}
@@ -749,7 +749,7 @@ func TestRaft_RemoveFollower(t *testing.T) {
 	}
 
 	// Wait a while
-	theRealWorld().Sleep(c.propagateTimeout)
+	realworld.Default().Sleep(c.propagateTimeout)
 
 	// Other nodes should have fewer peers
 	if configuration := c.getConfiguration(leader); len(configuration.Servers) != 2 {
@@ -772,9 +772,9 @@ func TestRaft_RemoveLeader(t *testing.T) {
 	leader := c.Leader()
 
 	// Wait until we have 2 followers
-	limit := theRealWorld().Now().Add(c.longstopTimeout)
+	limit := realworld.Default().Now().Add(c.longstopTimeout)
 	var followers []*Raft
-	for theRealWorld().Now().Before(limit) && len(followers) != 2 {
+	for realworld.Default().Now().Before(limit) && len(followers) != 2 {
 		c.WaitEvent(nil, c.conf.CommitTimeout)
 		followers = c.GetInState(Follower)
 	}
@@ -791,10 +791,10 @@ func TestRaft_RemoveLeader(t *testing.T) {
 	}
 
 	// Wait a bit for log application
-	theRealWorld().Sleep(c.propagateTimeout)
+	realworld.Default().Sleep(c.propagateTimeout)
 
 	// Should have a new leader
-	theRealWorld().Sleep(c.propagateTimeout)
+	realworld.Default().Sleep(c.propagateTimeout)
 	newLeader := c.Leader()
 	if newLeader == leader {
 		t.Fatalf("removed leader is still leader")
@@ -839,13 +839,13 @@ func TestRaft_RemoveLeader_NoShutdown(t *testing.T) {
 	}
 
 	// Wait a while
-	theRealWorld().Sleep(c.propagateTimeout)
+	realworld.Default().Sleep(c.propagateTimeout)
 
 	// Should have a new leader
 	newLeader := c.Leader()
 
 	// Wait a bit for log application
-	theRealWorld().Sleep(c.propagateTimeout)
+	realworld.Default().Sleep(c.propagateTimeout)
 
 	// Other nodes should have pulled the leader.
 	configuration := c.getConfiguration(newLeader)
@@ -886,9 +886,9 @@ func TestRaft_RemoveFollower_SplitCluster(t *testing.T) {
 	// Wait to make sure knowledge of the 4th server is known to all the
 	// peers.
 	numServers := 0
-	limit := theRealWorld().Now().Add(c.longstopTimeout)
-	for theRealWorld().Now().Before(limit) && numServers != 4 {
-		theRealWorld().Sleep(c.propagateTimeout)
+	limit := realworld.Default().Now().Add(c.longstopTimeout)
+	for realworld.Default().Now().Before(limit) && numServers != 4 {
+		realworld.Default().Sleep(c.propagateTimeout)
 		configuration := c.getConfiguration(leader)
 		numServers = len(configuration.Servers)
 	}
@@ -1580,7 +1580,7 @@ func TestRaft_SnapshotRestore_PeerChange(t *testing.T) {
 	c2.FullyConnect()
 
 	// Wait a while.
-	theRealWorld().Sleep(c.propagateTimeout)
+	realworld.Default().Sleep(c.propagateTimeout)
 
 	// Ensure we elect a leader, and that we replicate to our new followers.
 	c2.EnsureSame(t)
@@ -1617,7 +1617,7 @@ func TestRaft_AutoSnapshot(t *testing.T) {
 	}
 
 	// Wait for a snapshot to happen
-	theRealWorld().Sleep(c.propagateTimeout)
+	realworld.Default().Sleep(c.propagateTimeout)
 
 	// Check for snapshot
 	if snaps, _ := leader.snapshots.List(); len(snaps) == 0 {
@@ -1934,9 +1934,9 @@ func TestRaft_ReJoinFollower(t *testing.T) {
 	leader := c.Leader()
 
 	// Wait until we have 2 followers.
-	limit := theRealWorld().Now().Add(c.longstopTimeout)
+	limit := realworld.Default().Now().Add(c.longstopTimeout)
 	var followers []*Raft
-	for theRealWorld().Now().Before(limit) && len(followers) != 2 {
+	for realworld.Default().Now().Before(limit) && len(followers) != 2 {
 		c.WaitEvent(nil, c.conf.CommitTimeout)
 		followers = c.GetInState(Follower)
 	}
@@ -1952,7 +1952,7 @@ func TestRaft_ReJoinFollower(t *testing.T) {
 	}
 
 	// Other nodes should have fewer peers.
-	theRealWorld().Sleep(c.propagateTimeout)
+	realworld.Default().Sleep(c.propagateTimeout)
 	if configuration := c.getConfiguration(leader); len(configuration.Servers) != 2 {
 		t.Fatalf("too many peers: %v", configuration)
 	}
@@ -1964,9 +1964,9 @@ func TestRaft_ReJoinFollower(t *testing.T) {
 	// the removed server will be trying to run an election but will be
 	// ignored. The stability check will think this is off nominal because
 	// the RequestVote RPCs won't stop firing.
-	limit = theRealWorld().Now().Add(c.longstopTimeout)
+	limit = realworld.Default().Now().Add(c.longstopTimeout)
 	var leaders []*Raft
-	for theRealWorld().Now().Before(limit) && len(leaders) != 1 {
+	for realworld.Default().Now().Before(limit) && len(leaders) != 1 {
 		c.WaitEvent(nil, c.conf.CommitTimeout)
 		leaders, _ = c.pollState(Leader)
 	}
@@ -2010,9 +2010,9 @@ func TestRaft_LeaderLeaseExpire(t *testing.T) {
 	leader := c.Leader()
 
 	// Wait until we have a followers
-	limit := theRealWorld().Now().Add(c.longstopTimeout)
+	limit := realworld.Default().Now().Add(c.longstopTimeout)
 	var followers []*Raft
-	for theRealWorld().Now().Before(limit) && len(followers) != 1 {
+	for realworld.Default().Now().Before(limit) && len(followers) != 1 {
 		c.WaitEvent(nil, c.conf.CommitTimeout)
 		followers = c.GetInState(Follower)
 	}
@@ -2026,13 +2026,13 @@ func TestRaft_LeaderLeaseExpire(t *testing.T) {
 	c.Disconnect(follower.localAddr)
 
 	// Watch the leaderCh
-	timeout := theRealWorld().After(conf.LeaderLeaseTimeout * 2)
+	timeout := realworld.Default().After(conf.LeaderLeaseTimeout * 2)
 LOOP:
 	for {
 		{
 			var sel3 int
 			var sel3v1 bool
-			dst.Select(theRealWorld(),
+			dst.Select(realworld.Default(),
 				dst.OnRecv(leader.LeaderCh(), func(v bool, _ bool) { sel3 = 1; sel3v1 = v }),
 				dst.OnRecv(timeout, func(_ time.Time, _ bool) { sel3 = 2 }),
 			)
@@ -2062,7 +2062,7 @@ LOOP:
 
 	// Verify no further contact
 	last := follower.LastContact()
-	theRealWorld().Sleep(c.propagateTimeout)
+	realworld.Default().Sleep(c.propagateTimeout)
 
 	// Check that last contact has not changed
 	if last != follower.LastContact() {
@@ -2161,9 +2161,9 @@ func TestRaft_VerifyLeader_Fail(t *testing.T) {
 	{
 		var sel4 int
 		var sel4v1 bool
-		dst.Select(theRealWorld(),
+		dst.Select(realworld.Default(),
 			dst.OnRecv(leader.LeaderCh(), func(v bool, _ bool) { sel4 = 1; sel4v1 = v }),
-			dst.OnRecv(theRealWorld().After(conf.HeartbeatTimeout*3), func(_ time.Time, _ bool) { sel4 = 2 }),
+			dst.OnRecv(realworld.Default().After(conf.HeartbeatTimeout*3), func(_ time.Time, _ bool) { sel4 = 2 }),
 		)
 		switch sel4 {
 		case 1:
@@ -2201,9 +2201,9 @@ func TestRaft_VerifyLeader_PartialConnect(t *testing.T) {
 	leader := c.Leader()
 
 	// Wait until we have a followers
-	limit := theRealWorld().Now().Add(c.longstopTimeout)
+	limit := realworld.Default().Now().Add(c.longstopTimeout)
 	var followers []*Raft
-	for theRealWorld().Now().Before(limit) && len(followers) != 2 {
+	for realworld.Default().Now().Before(limit) && len(followers) != 2 {
 		c.WaitEvent(nil, c.conf.CommitTimeout)
 		followers = c.GetInState(Follower)
 	}
@@ -2226,7 +2226,7 @@ func TestRaft_VerifyLeader_PartialConnect(t *testing.T) {
 }
 
 func TestRaft_NotifyCh(t *testing.T) {
-	ch := dst.MakeChan[bool](theRealWorld(), 1)
+	ch := dst.MakeChan[bool](realworld.Default(), 1)
 	conf := inmemConfig(t)
 	conf.NotifyCh = ch
 	c := MakeCluster(1, t, conf)
@@ -2236,9 +2236,9 @@ func TestRaft_NotifyCh(t *testing.T) {
 	{
 		var sel5 int
 		var sel5v1 bool
-		dst.Select(theRealWorld(),
+		dst.Select(realworld.Default(),
 			dst.OnRecv(ch, func(v bool, _ bool) { sel5 = 1; sel5v1 = v }),
-			dst.OnRecv(theRealWorld().After(conf.HeartbeatTimeout*8), func(_ time.Time, _ bool) { sel5 = 2 }),
+			dst.OnRecv(realworld.Default().After(conf.HeartbeatTimeout*8), func(_ time.Time, _ bool) { sel5 = 2 }),
 		)
 		switch sel5 {
 		case 1:
@@ -2260,9 +2260,9 @@ func TestRaft_NotifyCh(t *testing.T) {
 	{
 		var sel6 int
 		var sel6v1 bool
-		dst.Select(theRealWorld(),
+		dst.Select(realworld.Default(),
 			dst.OnRecv(ch, func(v bool, _ bool) { sel6 = 1; sel6v1 = v }),
-			dst.OnRecv(theRealWorld().After(conf.HeartbeatTimeout*6), func(_ time.Time, _ bool) { sel6 = 2 }),
+			dst.OnRecv(realworld.Default().After(conf.HeartbeatTimeout*6), func(_ time.Time, _ bool) { sel6 = 2 }),
 		)
 		switch sel6 {
 		case 1:
@@ -2386,12 +2386,12 @@ func TestRaft_PreVoteMixedCluster(t *testing.T) {
 					t.Fatalf("err: %v", err)
 				}
 			}
-			theRealWorld().Sleep(c.propagateTimeout * 10)
+			realworld.Default().Sleep(c.propagateTimeout * 10)
 
 			leaderOld := c.Leader()
 			c.Followers()
 			c.Partition([]ServerAddress{leaderOld.localAddr})
-			theRealWorld().Sleep(c.propagateTimeout * 3)
+			realworld.Default().Sleep(c.propagateTimeout * 3)
 			leader := c.Leader()
 			require.NotEqual(t, leader.leaderID, leaderOld.leaderID)
 		})
@@ -2412,7 +2412,7 @@ func TestRaft_PreVoteAvoidElectionWithPartition(t *testing.T) {
 
 	//Partition a node and wait enough for it to increase its term
 	c.Partition([]ServerAddress{followers[0].localAddr})
-	theRealWorld().Sleep(10 * c.propagateTimeout)
+	realworld.Default().Sleep(10 * c.propagateTimeout)
 
 	// Check the leader is stable and the followers are as expected
 	leaderTerm := c.Leader().getCurrentTerm()
@@ -2421,7 +2421,7 @@ func TestRaft_PreVoteAvoidElectionWithPartition(t *testing.T) {
 
 	// reconnect the partitioned node
 	c.FullyConnect()
-	theRealWorld().Sleep(3 * c.propagateTimeout)
+	realworld.Default().Sleep(3 * c.propagateTimeout)
 
 	// Check that the number of followers increase and the term is not increased
 	require.Len(t, c.Followers(), 4)
@@ -2607,7 +2607,7 @@ func TestRaft_LeaderID_Propagated(t *testing.T) {
 		}
 	}
 	// Wait a while
-	theRealWorld().Sleep(c.propagateTimeout)
+	realworld.Default().Sleep(c.propagateTimeout)
 
 	// Sanity check the cluster.
 	c.EnsureSame(t)
@@ -2616,7 +2616,7 @@ func TestRaft_LeaderID_Propagated(t *testing.T) {
 }
 
 func TestRaft_LeadershipTransferInProgress(t *testing.T) {
-	r := &Raft{raftState: raftState{w: theRealWorld()}, leaderState: leaderState{}}
+	r := &Raft{raftState: raftState{w: realworld.Default()}, leaderState: leaderState{}}
 	r.setupLeaderState()
 
 	if r.getLeadershipTransferInProgress() != false {
@@ -2656,9 +2656,9 @@ func TestRaft_LeadershipTransferPickServer(t *testing.T) {
 		replState := map[ServerID]*followerReplication{}
 		for id, idx := range v.servers {
 			servers = append(servers, Server{ID: ServerID(id)})
-			replState[ServerID(id)] = &followerReplication{w: theRealWorld(), nextIndex: idx}
+			replState[ServerID(id)] = &followerReplication{w: realworld.Default(), nextIndex: idx}
 		}
-		r := Raft{raftState: raftState{w: theRealWorld()}, leaderState: leaderState{}, localID: ServerID(leaderID), configurations: configurations{latest: Configuration{Servers: servers}}}
+		r := Raft{raftState: raftState{w: realworld.Default()}, leaderState: leaderState{}, localID: ServerID(leaderID), configurations: configurations{latest: Configuration{Servers: servers}}}
 		r.lastLogIndex = uint64(v.lastLogIndex)
 		r.leaderState.replState = replState
 
@@ -2712,18 +2712,18 @@ func TestRaft_LeadershipTransferWithWrites(t *testing.T) {
 	c := MakeCluster(7, t, conf)
 	defer c.Close()
 
-	doneCh := dst.MakeChan[struct{}](theRealWorld(), 0)
+	doneCh := dst.MakeChan[struct{}](realworld.Default(), 0)
 	var writerErr error
 	var wg dst.WaitGroup
 	var writes int
 	wg.Add(1)
 	leader := c.Leader()
-	theRealWorld().Go(func() {
+	realworld.Default().Go(func() {
 		defer wg.Done()
 		for {
 			{
 				var sel7 int
-				dst.Select(theRealWorld(),
+				dst.Select(realworld.Default(),
 					dst.OnRecv(doneCh, func(_ struct{}, _ bool) { sel7 = 1 }),
 					dst.Default(func() { sel7 = 2 }),
 				)
@@ -2746,7 +2746,7 @@ func TestRaft_LeadershipTransferWithWrites(t *testing.T) {
 					default:
 						writerErr = err
 					}
-					theRealWorld().Sleep(time.Millisecond)
+					realworld.Default().Sleep(time.Millisecond)
 				default:
 					panic("dstmigrate: no select case ran")
 				}
@@ -2942,13 +2942,13 @@ func TestRaft_LeadershipTransferIgnoresNonvoters(t *testing.T) {
 }
 
 func TestRaft_LeadershipTransferStopRightAway(t *testing.T) {
-	r := Raft{raftState: raftState{w: theRealWorld()}, leaderState: leaderState{}, logger: hclog.New(nil)}
+	r := Raft{raftState: raftState{w: realworld.Default()}, leaderState: leaderState{}, logger: hclog.New(nil)}
 	r.setupLeaderState()
 
-	stopCh := dst.MakeChan[struct{}](theRealWorld(), 0)
-	doneCh := dst.MakeChan[error](theRealWorld(), 1)
+	stopCh := dst.MakeChan[struct{}](realworld.Default(), 0)
+	doneCh := dst.MakeChan[error](realworld.Default(), 1)
 	stopCh.Close()
-	r.leadershipTransfer(ServerID("a"), ServerAddress(""), &followerReplication{w: theRealWorld()}, stopCh, doneCh)
+	r.leadershipTransfer(ServerID("a"), ServerAddress(""), &followerReplication{w: realworld.Default()}, stopCh, doneCh)
 	err, _ := doneCh.Recv()
 	if err != nil {
 		t.Errorf("leadership shouldn't have started, but instead it error with: %v", err)
@@ -3166,7 +3166,7 @@ func TestRaft_ReloadConfigValidates(t *testing.T) {
 func TestRaft_InstallSnapshot_InvalidPeers(t *testing.T) {
 	_, transport := NewInmemTransport("")
 	r := &Raft{
-		raftState: raftState{w: theRealWorld()},
+		raftState: raftState{w: realworld.Default()},
 		trans:     transport,
 		logger:    hclog.New(nil),
 	}
@@ -3174,7 +3174,7 @@ func TestRaft_InstallSnapshot_InvalidPeers(t *testing.T) {
 	req := &InstallSnapshotRequest{
 		Peers: []byte("invalid msgpack"),
 	}
-	chResp := dst.MakeChan[RPCResponse](theRealWorld(), 1)
+	chResp := dst.MakeChan[RPCResponse](realworld.Default(), 1)
 	rpc := RPC{
 		Reader:   new(bytes.Buffer),
 		RespChan: chResp,
@@ -3195,9 +3195,9 @@ func TestRaft_VoteNotGranted_WhenNodeNotInCluster(t *testing.T) {
 	leader := c.Leader()
 
 	// Wait until we have 2 followers
-	limit := theRealWorld().Now().Add(c.longstopTimeout)
+	limit := realworld.Default().Now().Add(c.longstopTimeout)
 	var followers []*Raft
-	for theRealWorld().Now().Before(limit) && len(followers) != 2 {
+	for realworld.Default().Now().Before(limit) && len(followers) != 2 {
 		c.WaitEvent(nil, c.conf.CommitTimeout)
 		followers = c.GetInState(Follower)
 	}
@@ -3213,7 +3213,7 @@ func TestRaft_VoteNotGranted_WhenNodeNotInCluster(t *testing.T) {
 	}
 
 	// Wait a while
-	theRealWorld().Sleep(c.propagateTimeout)
+	realworld.Default().Sleep(c.propagateTimeout)
 
 	// Other nodes should have fewer peers
 	if configuration := c.getConfiguration(leader); len(configuration.Servers) != 2 {
@@ -3241,7 +3241,7 @@ func TestRaft_VoteNotGranted_WhenNodeNotInCluster(t *testing.T) {
 
 	// partition the leader to simulate an unstable cluster
 	c.Partition([]ServerAddress{leader.localAddr})
-	theRealWorld().Sleep(c.propagateTimeout)
+	realworld.Default().Sleep(c.propagateTimeout)
 
 	// wait for the remaining follower to trigger an election
 	waitForState(follower, Candidate)
@@ -3267,9 +3267,9 @@ func TestRaft_ClusterCanRegainStability_WhenNonVoterWithHigherTermJoin(t *testin
 	leader := c.Leader()
 
 	// Wait until we have 2 followers
-	limit := theRealWorld().Now().Add(c.longstopTimeout)
+	limit := realworld.Default().Now().Add(c.longstopTimeout)
 	var followers []*Raft
-	for theRealWorld().Now().Before(limit) && len(followers) != 2 {
+	for realworld.Default().Now().Before(limit) && len(followers) != 2 {
 		c.WaitEvent(nil, c.conf.CommitTimeout)
 		followers = c.GetInState(Follower)
 	}
@@ -3280,7 +3280,7 @@ func TestRaft_ClusterCanRegainStability_WhenNonVoterWithHigherTermJoin(t *testin
 	// Remove a follower
 	followerRemoved := followers[0]
 	c.Disconnect(followerRemoved.localAddr)
-	theRealWorld().Sleep(c.propagateTimeout)
+	realworld.Default().Sleep(c.propagateTimeout)
 
 	future := leader.RemoveServer(followerRemoved.localID, 0, 0)
 	if err := future.Error(); err != nil {
@@ -3299,7 +3299,7 @@ func TestRaft_ClusterCanRegainStability_WhenNonVoterWithHigherTermJoin(t *testin
 	c.FullyConnect()
 
 	// Wait a while
-	theRealWorld().Sleep(c.propagateTimeout)
+	realworld.Default().Sleep(c.propagateTimeout)
 	// Check the term is now a new term
 	leader = c.Leader()
 	currentTerm := leader.getCurrentTerm()
@@ -3329,7 +3329,7 @@ func TestRaft_ClusterCanRegainStability_WhenNonVoterWithHigherTermJoin(t *testin
 	leader.AddVoter(followerRemoved.localID, followerRemoved.localAddr, 0, 0)
 
 	// Wait a while
-	theRealWorld().Sleep(c.propagateTimeout * 10)
+	realworld.Default().Sleep(c.propagateTimeout * 10)
 
 	// Write some logs to ensure they replicate
 	for i := 100; i < 200; i++ {
@@ -3362,9 +3362,9 @@ func TestRaft_FollowerRemovalNoElection(t *testing.T) {
 	leader := c.Leader()
 
 	// Wait until we have 2 followers
-	limit := theRealWorld().Now().Add(c.longstopTimeout)
+	limit := realworld.Default().Now().Add(c.longstopTimeout)
 	var followers []*Raft
-	for theRealWorld().Now().Before(limit) && len(followers) != 2 {
+	for realworld.Default().Now().Before(limit) && len(followers) != 2 {
 		c.WaitEvent(nil, c.conf.CommitTimeout)
 		followers = c.GetInState(Follower)
 	}
@@ -3397,7 +3397,7 @@ func TestRaft_FollowerRemovalNoElection(t *testing.T) {
 	c.fsms[i] = n.fsm.(*MockFSM)
 	c.FullyConnect()
 	// There should be no re-election during this sleep
-	theRealWorld().Sleep(250 * time.Millisecond)
+	realworld.Default().Sleep(250 * time.Millisecond)
 
 	// Let things settle and make sure we recovered.
 	c.EnsureLeader(t, leader.localAddr)
@@ -3410,7 +3410,7 @@ func waitForState(follower *Raft, state RaftState) {
 	count := 0
 	for follower.getState() != state && count < 1000 {
 		count++
-		theRealWorld().Sleep(1 * time.Millisecond)
+		realworld.Default().Sleep(1 * time.Millisecond)
 	}
 }
 
@@ -3422,7 +3422,7 @@ func waitForLeader(c *cluster) error {
 			return nil
 		}
 		count++
-		theRealWorld().Sleep(50 * time.Millisecond)
+		realworld.Default().Sleep(50 * time.Millisecond)
 	}
 	return errors.New("no leader elected")
 }
@@ -3462,11 +3462,11 @@ func TestRaft_runFollower_State_Transition(t *testing.T) {
 			// run the follower loop exclusively
 			{
 				goArg11 := env1.raft
-				theRealWorld().Go(func() { goArg11.runFollower() })
+				realworld.Default().Go(func() { goArg11.runFollower() })
 			}
 
 			// wait enough time to have HeartbeatTimeout
-			theRealWorld().Sleep(tt.fields.conf.HeartbeatTimeout * 3)
+			realworld.Default().Sleep(tt.fields.conf.HeartbeatTimeout * 3)
 
 			// Check the follower loop set the right state
 			require.Equal(t, tt.expectedState, env1.raft.getState())
@@ -3493,7 +3493,7 @@ func TestRaft_runFollower_ReloadTimeoutConfigs(t *testing.T) {
 	// run the follower loop exclusively
 	{
 		goArg12 := env.raft
-		theRealWorld().Go(func() { goArg12.runFollower() })
+		realworld.Default().Go(func() { goArg12.runFollower() })
 	}
 
 	newCfg := ReloadableConfig{
@@ -3505,7 +3505,7 @@ func TestRaft_runFollower_ReloadTimeoutConfigs(t *testing.T) {
 	}
 	require.NoError(t, env.raft.ReloadConfig(newCfg))
 	// wait enough time to have HeartbeatTimeout
-	theRealWorld().Sleep(3 * newCfg.HeartbeatTimeout)
+	realworld.Default().Sleep(3 * newCfg.HeartbeatTimeout)
 
 	// Check the follower loop set the right state
 	require.Equal(t, Candidate, env.raft.getState())
@@ -3520,9 +3520,9 @@ func TestRaft_PreVote_ShouldNotRejectLeader(t *testing.T) {
 	leader := c.Leader()
 
 	// Wait until we have 2 followers
-	limit := theRealWorld().Now().Add(c.longstopTimeout)
+	limit := realworld.Default().Now().Add(c.longstopTimeout)
 	var followers []*Raft
-	for theRealWorld().Now().Before(limit) && len(followers) != 2 {
+	for realworld.Default().Now().Before(limit) && len(followers) != 2 {
 		c.WaitEvent(nil, c.conf.CommitTimeout)
 		followers = c.GetInState(Follower)
 	}
@@ -3561,9 +3561,9 @@ func TestRaft_PreVote_ShouldRejectNonLeader(t *testing.T) {
 	require.NoError(t, err)
 
 	// Wait until we have 2 followers
-	limit := theRealWorld().Now().Add(c.longstopTimeout)
+	limit := realworld.Default().Now().Add(c.longstopTimeout)
 	var followers []*Raft
-	for theRealWorld().Now().Before(limit) && len(followers) != 2 {
+	for realworld.Default().Now().Before(limit) && len(followers) != 2 {
 		c.WaitEvent(nil, c.conf.CommitTimeout)
 		followers = c.GetInState(Follower)
 	}

@@ -5,6 +5,7 @@ package raft
 
 import (
 	"fmt"
+	"github.com/prince776/go-dst-kit/realworld"
 	"io"
 	"os"
 	"time"
@@ -404,5 +405,5 @@ func (c *Config) worldOrReal() *dst.World {
 	if c.World != nil {
 		return c.World
 	}
-	return theRealWorld()
+	return realworld.Default()
 }

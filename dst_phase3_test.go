@@ -127,7 +127,7 @@ func TestDSTPhase3(t *testing.T) {
 	if os.Getenv("DST_PHASE3") != "1" {
 		t.Skip("phase 3 measurement: set DST_PHASE3=1")
 	}
-	defer func() { activeBug = "" }()
+	defer setSwitches("")
 	out := os.Getenv("DST_PHASE3_OUT")
 	if out == "" {
 		out = "phase3/swarm.tsv"
@@ -167,7 +167,7 @@ func TestDSTPhase3(t *testing.T) {
 		if !want(cell) || done[cell] {
 			continue
 		}
-		activeBug = phase3Switches(cell)
+		setSwitches(phase3Switches(cell))
 		limit := phase3BugSeeds
 		if v, err := strconv.Atoi(os.Getenv("DST_PHASE3_SEEDS")); err == nil && v > 0 {
 			limit = v
@@ -251,10 +251,13 @@ func TestDSTPhase3(t *testing.T) {
 // every known fix on: replay one of its seeds with -dst.seed=N (-dst.v for
 // the event log).
 func TestDSTPhase3Sweep(t *testing.T) {
-	activeBug = knownFixes
-	if v := os.Getenv("DSTBUG"); v != "" {
-		activeBug = v // to replay a seed with other switches
+	// To replay a seed with other switches: DSTSWITCHES, as setSwitches
+	// takes them (fixes and plants in one list).
+	if v := os.Getenv("DSTSWITCHES"); v != "" {
+		setSwitches(v)
+	} else {
+		setSwitches(knownFixes)
 	}
-	defer func() { activeBug = "" }()
+	defer setSwitches("")
 	dsttest.Run(t, dsttest.Options{Seeds: 50, Faults: phase3Faults, FaultPhase: 10 * time.Second, RecoveryPhase: 10 * time.Second}, phase3Setup)
 }

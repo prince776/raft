@@ -6,6 +6,11 @@ def edit(path, fn):
     t = fn(s)
     if t == s:
         sys.exit(f"manual.py: no change in {path}")
+    # go-dst-kit's realworld.Default and dstbugs, wherever an edit uses them
+    if 'realworld.Default()' in t:
+        t = imports(t, 'github.com/prince776/go-dst-kit/realworld')
+    if 'dstbugs.' in t:
+        t = imports(t, 'github.com/prince776/go-dst-kit/dstbugs')
     open(path, 'w').write(t)
 
 def func_range(s, name):
@@ -54,21 +59,16 @@ def util(s):
 }
 ''')
     s = s.replace('func generateUUID() string {', 'func generateUUID(w *dst.World) string {').replace('__w.Rand().CryptoRead(buf)', 'w.Rand().CryptoRead(buf)')
-    s += '''
-// theRealWorld is the real World, for code with no World of its own (a
-// default, or a test helper).
-var theRealWorld = sync.OnceValue(func() *dst.World { return realworld.New(realworld.Options{}) })
-'''
-    return imports(s, 'sync', 'github.com/prince776/go-dst-kit/realworld')
+    return s
 edit('util.go', util)
 
 for f in ['raft.go', 'replication.go', 'snapshot.go']:
     edit(f, lambda s: s.replace('randomTimeout(r.config()', 'randomTimeout(r.w, r.config()')
          .replace('randomTimeout(hbTimeout)', 'randomTimeout(r.w, hbTimeout)')
          .replace('randomTimeout(electionTimeout)', 'randomTimeout(r.w, electionTimeout)'))
-edit('inmem_transport.go', lambda s: s.replace('ServerAddress(generateUUID())', 'ServerAddress(generateUUID(theRealWorld()))'))
-edit('util_test.go', lambda s: s.replace('randomTimeout(time.Millisecond)', 'randomTimeout(theRealWorld(), time.Millisecond)')
-     .replace('randomTimeout(0)', 'randomTimeout(theRealWorld(), 0)').replace('generateUUID()', 'generateUUID(theRealWorld())'))
+edit('inmem_transport.go', lambda s: s.replace('ServerAddress(generateUUID())', 'ServerAddress(generateUUID(realworld.Default()))'))
+edit('util_test.go', lambda s: s.replace('randomTimeout(time.Millisecond)', 'randomTimeout(realworld.Default(), time.Millisecond)')
+     .replace('randomTimeout(0)', 'randomTimeout(realworld.Default(), 0)').replace('generateUUID()', 'generateUUID(realworld.Default())'))
 
 # NewRaft: the World from Config.World, else the real one.
 def newraft(s):
@@ -77,7 +77,7 @@ def newraft(s):
     b = s[i:j].replace('''	// Validate the configuration.''', '''	// The World raft runs in: the real one unless the config says.
 	w := conf.World
 	if w == nil {
-		w = theRealWorld()
+		w = realworld.Default()
 	}
 
 	// Validate the configuration.''', 1).replace('__w', 'w').replace('''	r.conf.Store(*conf)''', '''	r.w = w
@@ -99,7 +99,7 @@ edit('net_transport.go', in_func('newNetPipeline', 'trans.w'))
 def inmem(s):
     s = s.replace('''func NewInmemTransportWithTimeout(addr ServerAddress, timeout time.Duration) (ServerAddress, *InmemTransport) {''',
         '''func NewInmemTransportWithTimeout(addr ServerAddress, timeout time.Duration) (ServerAddress, *InmemTransport) {
-	return NewInmemTransportWithWorld(theRealWorld(), addr, timeout)
+	return NewInmemTransportWithWorld(realworld.Default(), addr, timeout)
 }
 
 // NewInmemTransportWithWorld is NewInmemTransportWithTimeout in the World w.
@@ -113,7 +113,7 @@ def nettrans(s):
     i, j = func_range(s, 'NewNetworkTransportWithConfig')
     b = s[i:j].replace('__w', 'w').replace('''	trans := &NetworkTransport{''', '''	w := config.World
 	if w == nil {
-		w = theRealWorld()
+		w = realworld.Default()
 	}
 	trans := &NetworkTransport{
 		w:                       w,''', 1)
@@ -127,7 +127,7 @@ def logm(s):
 edit('log.go', logm)
 edit('raft.go', lambda s: s.replace('emitLogStoreMetrics(goArg', 'emitLogStoreMetrics(r.w, goArg')
      .replace('startSnapshotRestoreMonitor(r.logger,', 'startSnapshotRestoreMonitor(r.w, r.logger,'))
-edit('log_test.go', lambda s: s.replace('emitLogStoreMetrics(s, ', 'emitLogStoreMetrics(theRealWorld(), s, '))
+edit('log_test.go', lambda s: s.replace('emitLogStoreMetrics(s, ', 'emitLogStoreMetrics(realworld.Default(), s, '))
 
 def sat(s):
     s = s.replace('func newSaturationMetric(name []string,', 'func newSaturationMetric(w *dst.World, name []string,')
@@ -135,7 +135,7 @@ def sat(s):
     return s.replace('''		lastReport:     w.Now(),''', '''		w:              w,
 		lastReport:     w.Now(),''')
 edit('saturation.go', sat)
-edit('saturation_test.go', lambda s: s.replace('newSaturationMetric([]string', 'newSaturationMetric(theRealWorld(), []string'))
+edit('saturation_test.go', lambda s: s.replace('newSaturationMetric([]string', 'newSaturationMetric(realworld.Default(), []string'))
 
 def prog(s):
     s = re.sub(r'func startSnapshotRestoreMonitor\(\n', 'func startSnapshotRestoreMonitor(\n\tw *dst.World,\n', s)
@@ -160,7 +160,7 @@ func (c *Config) worldOrReal() *dst.World {
 	if c.World != nil {
 		return c.World
 	}
-	return theRealWorld()
+	return realworld.Default()
 }
 ''')
 
@@ -174,7 +174,7 @@ def snapname(s):
     return imports(s, 'github.com/prince776/go-dst-kit/dst') + '''
 func (f *FileSnapshotStore) world() *dst.World {
 	if f.w == nil {
-		return theRealWorld()
+		return realworld.Default()
 	}
 	return f.w
 }
@@ -183,23 +183,20 @@ edit('file_snapshot.go', snapname)
 
 # FileSnapshotStore on a World's filesystem (phase 1 item 3). dstmigrate
 # rewrote its os calls to f.world().FS(); the constructor (no receiver)
-# takes the World explicitly. With none it is the real World rooted at
-# the filesystem's root, so base may be any ordinary path, as before, and
-# the store recreates its directory if it is removed (as upstream does).
+# takes the World explicitly. With none it is the real World
+# (realworld.Default: plain os calls, so base is any ordinary path, as
+# before, and the store recreates its directory if it is removed, as
+# upstream does).
 def filesnapworld(s):
     sig = 'func NewFileSnapshotStoreWithLogger(base string, retain int, logger hclog.Logger) (*FileSnapshotStore, error) {'
     i = s.index(sig); j = s.index('\n}\n', i)
     body = s[i:j]
     body = body.replace(sig, """func NewFileSnapshotStoreWithLogger(base string, retain int, logger hclog.Logger) (*FileSnapshotStore, error) {
-	w, rel, err := realWorldAt(base)
-	if err != nil {
-		return nil, fmt.Errorf("snapshot path not accessible: %v", err)
-	}
-	return NewFileSnapshotStoreWithWorld(w, rel, retain, logger)
+	return NewFileSnapshotStoreWithWorld(realworld.Default(), base, retain, logger)
 }
 
 // NewFileSnapshotStoreWithWorld is NewFileSnapshotStoreWithLogger keeping
-// the snapshots on w's filesystem, under base (relative to its root).
+// the snapshots on w's filesystem, under base.
 func NewFileSnapshotStoreWithWorld(w *dst.World, base string, retain int, logger hclog.Logger) (*FileSnapshotStore, error) {""")
     assert '__w' in body, body
     body = body.replace('__w', 'w')
@@ -210,30 +207,7 @@ func NewFileSnapshotStoreWithWorld(w *dst.World, base string, retain int, logger
 		w:      w,
 	}""")
     s = s[:i] + body + s[j:]
-    s = imports(s, 'github.com/prince776/go-dst-kit/realworld')
-    return s + """
-// realWorldAt returns the real World rooted at the filesystem's root and
-// dir's path in it. dir is created if missing and its symbolic links
-// resolved (a World's root refuses absolute ones, such as macOS's /var).
-func realWorldAt(dir string) (*dst.World, string, error) {
-	if err := os.MkdirAll(dir, 0o755); err != nil { //dst:ok the real World's root
-		return nil, "", err
-	}
-	abs, err := filepath.Abs(dir)
-	if err == nil {
-		abs, err = filepath.EvalSymlinks(abs)
-	}
-	if err != nil {
-		return nil, "", err
-	}
-	root := filepath.VolumeName(abs) + string(filepath.Separator)
-	rel, err := filepath.Rel(root, abs)
-	if err != nil {
-		return nil, "", err
-	}
-	return realworld.New(realworld.Options{Dir: root}), rel, nil
-}
-"""
+    return s
 edit('file_snapshot.go', filesnapworld)
 def inmemsnap(s):
     s = s.replace('	name := snapshotName(term, index)', '	name := snapshotName(m.world(), term, index)')
@@ -242,7 +216,7 @@ def inmemsnap(s):
     return imports(s, 'github.com/prince776/go-dst-kit/dst') + '''
 func (m *InmemSnapshotStore) world() *dst.World {
 	if m.w == nil {
-		return theRealWorld()
+		return realworld.Default()
 	}
 	return m.w
 }
@@ -253,7 +227,7 @@ edit('inmem_snapshot.go', inmemsnap)
 def cluster(s):
     s = in_func('makeCluster', 'w')(s)
     return s.replace('''	c := &cluster{
-		observationCh:''', '''	w := theRealWorld()
+		observationCh:''', '''	w := realworld.Default()
 	c := &cluster{
 		w:             w,
 		observationCh:''', 1)
@@ -262,23 +236,23 @@ edit('testing.go', cluster)
 # Tests that build transports by struct literal: the real World.
 edit('inmem_transport_test.go', lambda s: s.replace('''	t1 := &InmemTransport{
 ''', '''	t1 := &InmemTransport{
-		w: theRealWorld(),
+		w: realworld.Default(),
 ''').replace('''	t2 := &InmemTransport{
 ''', '''	t2 := &InmemTransport{
-		w: theRealWorld(),
+		w: realworld.Default(),
 '''))
 
 # More test literals of types holding a World.
 edit('net_transport_test.go', lambda s: s.replace('''	transport := NetworkTransport{
 ''', '''	transport := NetworkTransport{
-		w:          theRealWorld(),
+		w:          realworld.Default(),
 '''))
-edit('raft_test.go', lambda s: s.replace('Raft{leaderState: leaderState{}', 'Raft{raftState: raftState{w: theRealWorld()}, leaderState: leaderState{}')
-     .replace('&followerReplication{nextIndex: idx}', '&followerReplication{w: theRealWorld(), nextIndex: idx}')
-     .replace('&followerReplication{}, stopCh', '&followerReplication{w: theRealWorld()}, stopCh')
+edit('raft_test.go', lambda s: s.replace('Raft{leaderState: leaderState{}', 'Raft{raftState: raftState{w: realworld.Default()}, leaderState: leaderState{}')
+     .replace('&followerReplication{nextIndex: idx}', '&followerReplication{w: realworld.Default(), nextIndex: idx}')
+     .replace('&followerReplication{}, stopCh', '&followerReplication{w: realworld.Default()}, stopCh')
      .replace('''	r := &Raft{
 		trans:  transport,''', '''	r := &Raft{
-		raftState: raftState{w: theRealWorld()},
+		raftState: raftState{w: realworld.Default()},
 		trans:     transport,'''))
 
 # The leader's per-follower replication state runs in the leader's World.
@@ -323,54 +297,54 @@ def in_func(head, a, b, n=1):
 edit('commitment.go', lambda s: s.replace('''	quorumMatchIndex := matched[(len(matched)-1)/2]
 
 	if quorumMatchIndex > c.commitIndex && quorumMatchIndex >= c.startIndex {''', '''	quorumMatchIndex := matched[(len(matched)-1)/2]
-	if bug("quorum-off-by-one") {
+	if dstbugs.Bug("quorum-off-by-one") {
 		quorumMatchIndex = matched[len(matched)/2] // before 163a55f: half of an even cluster
 	}
 
-	if quorumMatchIndex > c.commitIndex && (quorumMatchIndex >= c.startIndex || bug("commit-previous-term")) {''', 1))
+	if quorumMatchIndex > c.commitIndex && (quorumMatchIndex >= c.startIndex || dstbugs.Bug("commit-previous-term")) {''', 1))
 edit('raft.go', in_func('func (r *Raft) requestVote(', 'if lastVoteTerm == req.Term && lastVoteCandBytes != nil {',
-     'if lastVoteTerm == req.Term && lastVoteCandBytes != nil && !bug("vote-twice") {'))
+     'if lastVoteTerm == req.Term && lastVoteCandBytes != nil && !dstbugs.Bug("vote-twice") {'))
 for head in ('func (r *Raft) requestVote(', 'func (r *Raft) requestPreVote('):
-    edit('raft.go', in_func(head, 'if lastTerm > req.LastLogTerm {', 'if lastTerm > req.LastLogTerm && !bug("vote-ignores-log") {'))
+    edit('raft.go', in_func(head, 'if lastTerm > req.LastLogTerm {', 'if lastTerm > req.LastLogTerm && !dstbugs.Bug("vote-ignores-log") {'))
     edit('raft.go', in_func(head, 'if lastTerm == req.LastLogTerm && lastIdx > req.LastLogIndex {',
-         'if lastTerm == req.LastLogTerm && lastIdx > req.LastLogIndex && !bug("vote-ignores-log") {'))
+         'if lastTerm == req.LastLogTerm && lastIdx > req.LastLogIndex && !dstbugs.Bug("vote-ignores-log") {'))
 edit('raft.go', in_func('func (r *Raft) appendEntries(', 'if a.Term < r.getCurrentTerm() {',
-     'if a.Term < r.getCurrentTerm() && !bug("accept-stale-leader") {'))
+     'if a.Term < r.getCurrentTerm() && !dstbugs.Bug("accept-stale-leader") {'))
 edit('raft.go', in_func('func (r *Raft) appendEntries(', 'if a.PrevLogTerm != prevLogTerm {',
-     'if a.PrevLogTerm != prevLogTerm && !bug("skip-prev-log-term") {'))
+     'if a.PrevLogTerm != prevLogTerm && !dstbugs.Bug("skip-prev-log-term") {'))
 edit('snapshot.go', lambda s: s.replace('''	maxLog := min(snapIdx, lastLogIdx-trailingLogs)
 ''', '''	maxLog := min(snapIdx, lastLogIdx-trailingLogs)
-	if bug("compact-past-snapshot") {
+	if dstbugs.Bug("compact-past-snapshot") {
 		maxLog = lastLogIdx - trailingLogs // deletes entries the snapshot doesn't hold
 	}
 ''', 1))
 
 # Membership bug switches (dstbench.json).
 edit('raft.go', lambda s: s.replace('''					if hasVote(r.configurations.latest, r.localID) {''',
-    '''					if hasVote(r.configurations.latest, r.localID) || (bug("nonvoter-can-lead") && inConfiguration(r.configurations.latest, r.localID)) {''', 1))
+    '''					if hasVote(r.configurations.latest, r.localID) || (dstbugs.Bug("nonvoter-can-lead") && inConfiguration(r.configurations.latest, r.localID)) {''', 1))
 for head in ('func (r *Raft) requestVote(', 'func (r *Raft) requestPreVote('):
     edit('raft.go', in_func(head, 'if len(r.configurations.latest.Servers) > 0 && !hasVote(r.configurations.latest, candidateID) {',
-         'if len(r.configurations.latest.Servers) > 0 && !hasVote(r.configurations.latest, candidateID) && !bug("nonvoter-can-lead") {'))
+         'if len(r.configurations.latest.Servers) > 0 && !hasVote(r.configurations.latest, candidateID) && !dstbugs.Bug("nonvoter-can-lead") {'))
 edit('raft.go', in_func('func (r *Raft) checkLeaderLease(', 'if server.Suffrage == Voter {',
-     'if server.Suffrage == Voter || bug("lease-counts-nonvoters") {'))
+     'if server.Suffrage == Voter || dstbugs.Bug("lease-counts-nonvoters") {'))
 edit('raft.go', in_func('func (r *Raft) configurationChangeChIfStable(', '''	if r.configurations.latestIndex == r.configurations.committedIndex &&
-		r.getCommitIndex() >= r.leaderState.commitment.startIndex {''', '''	if (r.configurations.latestIndex == r.configurations.committedIndex || bug("two-changes-in-flight")) &&
-		(r.getCommitIndex() >= r.leaderState.commitment.startIndex || bug("config-change-before-noop")) {'''))
+		r.getCommitIndex() >= r.leaderState.commitment.startIndex {''', '''	if (r.configurations.latestIndex == r.configurations.committedIndex || dstbugs.Bug("two-changes-in-flight")) &&
+		(r.getCommitIndex() >= r.leaderState.commitment.startIndex || dstbugs.Bug("config-change-before-noop")) {'''))
 
 # The candidate checks of 6b4e320 and the pre-vote code (a receiver
 # rejects a candidate missing from, or not a voter in, its own latest
 # configuration), off: raft before 6b4e320 (upstream #524's problem).
 for head in ('func (r *Raft) requestVote(', 'func (r *Raft) requestPreVote('):
     edit('raft.go', in_func(head, '!inConfiguration(r.configurations.latest, candidateID) {',
-         '!inConfiguration(r.configurations.latest, candidateID) && !bug("no-candidate-config-check") {'))
-    edit('raft.go', in_func(head, '&& !bug("nonvoter-can-lead") {',
-         '&& !bug("nonvoter-can-lead") && !bug("no-candidate-config-check") {'))
+         '!inConfiguration(r.configurations.latest, candidateID) && !dstbugs.Bug("no-candidate-config-check") {'))
+    edit('raft.go', in_func(head, '&& !dstbugs.Bug("nonvoter-can-lead") {',
+         '&& !dstbugs.Bug("nonvoter-can-lead") && !dstbugs.Bug("no-candidate-config-check") {'))
 
 # Experiment: the candidate checks only when the candidate isn't ahead
 # (dstfix.go; UPSTREAM-ISSUE-DRAFT.md's proposed fix).
 for head in ('func (r *Raft) requestVote(', 'func (r *Raft) requestPreVote('):
-    edit('raft.go', in_func(head, '&& !bug("no-candidate-config-check") {',
-         '&& !bug("no-candidate-config-check") && !(bug("candidate-check-unless-ahead") && candidateAhead(r, req.LastLogTerm, req.LastLogIndex)) {', 2))
+    edit('raft.go', in_func(head, '&& !dstbugs.Bug("no-candidate-config-check") {',
+         '&& !dstbugs.Bug("no-candidate-config-check") && !(dstbugs.Fix("candidate-check-unless-ahead") && candidateAhead(r, req.LastLogTerm, req.LastLogIndex)) {', 2))
 
 # Experiment: BootstrapCluster appends the configuration entry before it
 # saves the term, so a crash between the two leaves a node that can still
@@ -383,7 +357,7 @@ def bootstrap_log_first(s):
 '''
     assert s.count(a) == 1
     s = s.replace(a, '''	// Set current term to 1.
-	if !bug("bootstrap-log-first") {
+	if !dstbugs.Fix("bootstrap-log-first") {
 		if err := stable.SetUint64(keyCurrentTerm, 1); err != nil {
 			return fmt.Errorf("failed to save current term: %v", err)
 		}
@@ -398,7 +372,7 @@ def bootstrap_log_first(s):
     return s.replace(b, '''	if err := logs.StoreLog(entry); err != nil {
 		return fmt.Errorf("failed to append configuration entry to log: %v", err)
 	}
-	if bug("bootstrap-log-first") {
+	if dstbugs.Fix("bootstrap-log-first") {
 		if err := stable.SetUint64(keyCurrentTerm, 1); err != nil {
 			return fmt.Errorf("failed to save current term: %v", err)
 		}
@@ -419,14 +393,14 @@ edit('raft.go', in_func('func (r *Raft) appendEntries(', '''		var prevLogTerm ui
 		snapIdx, _ := r.getLastSnapshot()
 		if a.PrevLogEntry == lastIdx {
 			prevLogTerm = lastTerm
-		} else if bug("snapshot-boundary-fix") && a.PrevLogEntry <= snapIdx {
+		} else if dstbugs.Fix("snapshot-boundary-fix") && a.PrevLogEntry <= snapIdx {
 			prevLogTerm = a.PrevLogTerm // committed: the leader's entry is ours
 		} else {'''))
 edit('raft.go', in_func('func (r *Raft) installSnapshot(', '''		reqConfigurationIndex = req.LastLogIndex
 	}
 	version := getSnapshotVersion(r.protocolVersion)''', '''		reqConfigurationIndex = req.LastLogIndex
 	}
-	if bug("snapshot-boundary-fix") && r.holdsEntry(req.LastLogIndex, req.LastLogTerm) {
+	if dstbugs.Fix("snapshot-boundary-fix") && r.holdsEntry(req.LastLogIndex, req.LastLogTerm) {
 		// Figure 13, rule 6: we hold the snapshot's last entry, so we
 		// continue from it without installing.
 		resp.Success = true
@@ -440,7 +414,7 @@ edit('raft.go', in_func('func (r *Raft) appendEntries(', '''		lastLogIdx, _ := r
 		snapshotIdx, _ := r.getLastSnapshot()
 		var newEntries []*Log
 		for i, entry := range a.Entries {
-			if bug("snapshot-boundary-fix") && entry.Index <= snapshotIdx {
+			if dstbugs.Fix("snapshot-boundary-fix") && entry.Index <= snapshotIdx {
 				continue // committed, and in our snapshot
 			}
 			if entry.Index > lastLogIdx {'''))
@@ -450,7 +424,7 @@ edit('raft.go', in_func('func (r *Raft) appendEntries(', '''		lastLogIdx, _ := r
 edit('raft.go', in_func('func (r *Raft) processLogs(', '''			batch = append(batch, preparedLog)
 
 			// If we have filled up a batch, send it to the FSM''', '''			batch = append(batch, preparedLog)
-			if bug("apply-entry-twice") && idx%50 == 0 {
+			if dstbugs.Bug("apply-entry-twice") && idx%50 == 0 {
 				batch = append(batch, preparedLog)
 			}
 
@@ -463,7 +437,7 @@ edit('raft.go', in_func('func (r *Raft) processLogs(', '''			batch = append(batc
 # every entry after it.
 edit('api.go', in_func('func (r *Raft) restoreSnapshot() error {', '''	for _, snapshot := range snapshots {
 		if success := r.tryRestoreSingleSnapshot(snapshot); !success {''', '''	for _, snapshot := range snapshots {
-		if bug("snapshot-fallback-needs-log") && !r.logFollows(snapshot.Index) {
+		if dstbugs.Fix("snapshot-fallback-needs-log") && !r.logFollows(snapshot.Index) {
 			r.logger.Error("not restoring a snapshot the log was compacted past", "id", snapshot.ID, "last-index", snapshot.Index)
 			continue
 		}
@@ -475,7 +449,7 @@ edit('api.go', in_func('func (r *Raft) restoreSnapshot() error {', '''	for _, sn
 edit('api.go', lambda s: s.replace('''	// Scan through the log for any configuration change entries.
 	snapshotIndex, _ := r.getLastSnapshot()''', '''	// Scan through the log for any configuration change entries.
 	snapshotIndex, _ := r.getLastSnapshot()
-	if bug("snapshot-fallback-needs-log") && !r.logFollows(snapshotIndex) {
+	if dstbugs.Fix("snapshot-fallback-needs-log") && !r.logFollows(snapshotIndex) {
 		first, _ := r.logs.FirstIndex()
 		return nil, fmt.Errorf("the log starts at %d, past the restored snapshot's index %d: a later snapshot couldn't be read", first, snapshotIndex)
 	}''', 1))
@@ -510,7 +484,7 @@ edit('raft.go', in_func('func (r *Raft) electSelf(', '''				if err := r.persistV
 				r.dstVoted(req.Term, req.Addr)'''))
 # Bug for "terms never go back": a restarted node forgets its term.
 edit('api.go', in_func('func NewRaft(', '''	currentTerm, err := stable.GetUint64(keyCurrentTerm)''', '''	currentTerm, err := stable.GetUint64(keyCurrentTerm)
-	if bug("forget-term-on-restart") {
+	if dstbugs.Bug("forget-term-on-restart") {
 		currentTerm = 0
 	}'''))
 
@@ -545,7 +519,7 @@ edit('raft.go', in_func('func (r *Raft) appendEntriesOn(', '''	defer func() {
 	}()'''))
 edit('raft.go', in_func('func (r *Raft) appendEntriesOn(', '''	if a.Term > r.getCurrentTerm() || (r.getState() != Follower && !r.candidateFromLeadershipTransfer.Load()) {
 		// Ensure transition to follower''', '''	if a.Term > r.getCurrentTerm() || (r.getState() != Follower && !r.candidateFromLeadershipTransfer.Load()) {
-		if heartbeat && bug("heartbeat-on-main-thread") {
+		if heartbeat && dstbugs.Fix("heartbeat-on-main-thread") {
 			// Changing the term or the state is the main loop's job.
 			forwarded = true
 			r.rpcCh.Send(rpc)
@@ -556,7 +530,7 @@ edit('raft.go', in_func('func (r *Raft) appendEntriesOn(', '''	if a.Term > r.get
 # Phase 2 step 2's plant: a follower ignores the leader's commit index, so
 # it never applies (caught only by "every member catches up").
 edit('raft.go', in_func('func (r *Raft) appendEntriesOn(', 'if a.LeaderCommitIndex > 0 && a.LeaderCommitIndex > r.getCommitIndex() {',
-     'if a.LeaderCommitIndex > 0 && a.LeaderCommitIndex > r.getCommitIndex() && !bug("follower-ignores-commit") {'))
+     'if a.LeaderCommitIndex > 0 && a.LeaderCommitIndex > r.getCommitIndex() && !dstbugs.Bug("follower-ignores-commit") {'))
 
 # newSeed (only upstream's util_test calls it) stays on crypto/rand:
 # dstmigrate now maps crypto/rand.Reader to the World's, and no World is
@@ -568,7 +542,7 @@ edit('util.go', lambda s: s.replace('crand.Int(dst.CryptoReader(__w), big.NewInt
 edit('raft.go', in_func('func (r *Raft) leaderLoop(', '''				r.w.Go(func() {
 					defer r.setLeadershipTransferInProgress(false)''', '''				r.w.Go(func() {
 					defer func() {
-						if !bug("transfer-flag-sticks") {
+						if !dstbugs.Bug("transfer-flag-sticks") {
 							r.setLeadershipTransferInProgress(false)
 						}
 					}()'''))
@@ -581,7 +555,7 @@ edit('raft.go', in_func('func (r *Raft) leaderLoop(', '''				r.w.Go(func() {
 # in progress" flag is never cleared, and the node, re-elected, refuses
 # every write. With the fix the send gives way to stopCh.
 edit('raft.go', in_func('func (r *Raft) leadershipTransfer(id ServerID', '''		repl.triggerDeferErrorCh.Send(err)
-''', '''		if bug("transfer-send-stoppable") {
+''', '''		if dstbugs.Fix("transfer-send-stoppable") {
 			stopped := false
 			dst.Select(r.w,
 				dst.OnSend(repl.triggerDeferErrorCh, err, func() {}),
@@ -608,7 +582,7 @@ edit('raft.go', in_func('func (r *Raft) leadershipTransfer(id ServerID', '''		re
 # closes the pipeline as it exits, which unblocks both.
 edit('replication.go', in_func('func (r *Raft) pipelineDecode(', '''	defer finishCh.Close()
 ''', '''	defer finishCh.Close()
-	if bug("pipeline-close-on-abort") {
+	if dstbugs.Fix("pipeline-close-on-abort") {
 		defer p.Close()
 	}
 '''))
@@ -621,7 +595,7 @@ edit('replication.go', in_func('func (r *Raft) pipelineDecode(', '''	defer finis
 # log holds the snapshot's last entry (same index and term), keep what
 # follows it; otherwise discard the entire log.
 edit('raft.go', in_func('func (r *Raft) installSnapshot(', '''	// Clear old logs if r.logs is a MonotonicLogStore. Otherwise compact the
-	// logs. In both cases, log any errors and continue.''', '''	if bug("snapshot-install-rule7") {
+	// logs. In both cases, log any errors and continue.''', '''	if dstbugs.Fix("snapshot-install-rule7") {
 		var l Log
 		if err := r.logs.GetLog(req.LastLogIndex, &l); err != nil || l.Term != req.LastLogTerm {
 			// Figure 13 rule 7: the log doesn't hold the snapshot's last
@@ -700,7 +674,7 @@ edit('net_transport.go', bufreuse)
 edit('raft.go', lambda s: s.replace('''	r.dispatchLogs([]*logFuture{&future.logFuture})
 	index := future.Index()
 	r.setLatestConfiguration(configuration, index)''', '''	r.dispatchLogs([]*logFuture{&future.logFuture})
-	if bug("config-only-if-stored") && r.getState() != Leader {
+	if dstbugs.Fix("config-only-if-stored") && r.getState() != Leader {
 		// Storing the entry failed: dispatchLogs answered the future with
 		// the error and stepped down. The configuration never reached the
 		// log, so it isn't this node's.
@@ -708,3 +682,8 @@ edit('raft.go', lambda s: s.replace('''	r.dispatchLogs([]*logFuture{&future.logF
 	}
 	index := future.Index()
 	r.setLatestConfiguration(configuration, index)''', 1))
+
+# tcp_transport.go: TCP stream layers have no World (the simulation uses
+# its own); dstmigrate now maps net.Listen and net.DialTimeout, so they
+# go through the real World, which is exactly net's.
+edit('tcp_transport.go', lambda s: s.replace('__w.Net().Listen(', 'realworld.Default().Net().Listen(').replace('dst.DialTimeout(__w, ', 'dst.DialTimeout(realworld.Default(), '))

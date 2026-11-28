@@ -4,6 +4,7 @@
 package raft
 
 import (
+	"github.com/prince776/go-dst-kit/dstbugs"
 	"sort"
 
 	"github.com/prince776/go-dst-kit/dst"
@@ -97,11 +98,11 @@ func (c *commitment) recalculate() {
 	}
 	sort.Sort(uint64Slice(matched))
 	quorumMatchIndex := matched[(len(matched)-1)/2]
-	if bug("quorum-off-by-one") {
+	if dstbugs.Bug("quorum-off-by-one") {
 		quorumMatchIndex = matched[len(matched)/2] // before 163a55f: half of an even cluster
 	}
 
-	if quorumMatchIndex > c.commitIndex && (quorumMatchIndex >= c.startIndex || bug("commit-previous-term")) {
+	if quorumMatchIndex > c.commitIndex && (quorumMatchIndex >= c.startIndex || dstbugs.Bug("commit-previous-term")) {
 		c.commitIndex = quorumMatchIndex
 		asyncNotifyCh(c.commitCh)
 	}

@@ -41,8 +41,8 @@ func TestDSTPhase4Forks(t *testing.T) {
 	if os.Getenv("DST_PHASE4_FORKS") != "1" {
 		t.Skip("set DST_PHASE4_FORKS=1")
 	}
-	defer func() { activeBug = "" }()
-	activeBug = "strict-checks"
+	defer setSwitches("")
+	setSwitches("strict-checks")
 	n := 1000
 	if v, err := strconv.Atoi(os.Getenv("DST_PHASE4_RUNS")); err == nil && v > 0 {
 		n = v

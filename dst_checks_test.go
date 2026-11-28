@@ -6,6 +6,7 @@ package raft
 import (
 	"errors"
 	"fmt"
+	"github.com/prince776/go-dst-kit/dstbugs"
 	"maps"
 	"slices"
 	"strings"
@@ -211,7 +212,7 @@ func (c *simCluster) recovers(w *dst.World) error {
 				c.kv.acked[id] = true
 				return nil
 			}
-			if errors.Is(err, ErrLeadershipTransferInProgress) && !bug("transfer-send-stoppable") && !bug("strict-checks") && w.Now().After(deadline) {
+			if errors.Is(err, ErrLeadershipTransferInProgress) && !dstbugs.Fix("transfer-send-stoppable") && !dstbugs.Bug("strict-checks") && w.Now().After(deadline) {
 				// Upstream raft does this (6.14, #696: a transfer goroutine
 				// stuck on a send keeps the flag set, and the re-elected
 				// leader refuses writes). Counted, not failed, unless the

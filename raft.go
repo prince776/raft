@@ -8,6 +8,7 @@ import (
 	"container/list"
 	"errors"
 	"fmt"
+	"github.com/prince776/go-dst-kit/dstbugs"
 	"io"
 	"strings"
 	"sync/atomic"
@@ -292,7 +293,7 @@ func (r *Raft) runFollower() {
 					}
 				} else {
 					metrics.IncrCounter([]string{"raft", "transition", "heartbeat_timeout"}, 1)
-					if hasVote(r.configurations.latest, r.localID) || (bug("nonvoter-can-lead") && inConfiguration(r.configurations.latest, r.localID)) {
+					if hasVote(r.configurations.latest, r.localID) || (dstbugs.Bug("nonvoter-can-lead") && inConfiguration(r.configurations.latest, r.localID)) {
 						r.logger.Warn("heartbeat timeout reached, starting election", "last-leader-addr", lastLeaderAddr, "last-leader-id", lastLeaderID)
 						r.setState(Candidate)
 						return
@@ -794,8 +795,8 @@ func (r *Raft) configurationChangeChIfStable() dst.Chan[*configurationChangeFutu
 	// 1. The latest configuration is committed, and
 	// 2. This leader has committed some entry (the noop) in this term
 	//    https://groups.google.com/forum/#!msg/raft-dev/t4xj6dJTP6E/d2D9LrWRza8J
-	if (r.configurations.latestIndex == r.configurations.committedIndex || bug("two-changes-in-flight")) &&
-		(r.getCommitIndex() >= r.leaderState.commitment.startIndex || bug("config-change-before-noop")) {
+	if (r.configurations.latestIndex == r.configurations.committedIndex || dstbugs.Bug("two-changes-in-flight")) &&
+		(r.getCommitIndex() >= r.leaderState.commitment.startIndex || dstbugs.Bug("config-change-before-noop")) {
 		return r.configurationChangeCh
 	}
 	return (dst.Chan[*configurationChangeFuture]{})
@@ -891,7 +892,7 @@ func (r *Raft) leaderLoop() {
 				// to be tested and this situation mirrors what callers already had to deal with.
 				r.w.Go(func() {
 					defer func() {
-						if !bug("transfer-flag-sticks") {
+						if !dstbugs.Bug("transfer-flag-sticks") {
 							r.setLeadershipTransferInProgress(false)
 						}
 					}()
@@ -1224,7 +1225,7 @@ func (r *Raft) leadershipTransfer(id ServerID, address ServerAddress, repl *foll
 	for atomic.LoadUint64(&repl.nextIndex) <= r.getLastIndex() {
 		err := &deferError{}
 		err.init(r.w)
-		if bug("transfer-send-stoppable") {
+		if dstbugs.Fix("transfer-send-stoppable") {
 			stopped := false
 			dst.Select(r.w,
 				dst.OnSend(repl.triggerDeferErrorCh, err, func() {}),
@@ -1294,7 +1295,7 @@ func (r *Raft) checkLeaderLease() time.Duration {
 	var maxDiff time.Duration
 	now := r.w.Now()
 	for _, server := range r.configurations.latest.Servers {
-		if server.Suffrage == Voter || bug("lease-counts-nonvoters") {
+		if server.Suffrage == Voter || dstbugs.Bug("lease-counts-nonvoters") {
 			if server.ID == r.localID {
 				contacted++
 				continue
@@ -1490,7 +1491,7 @@ func (r *Raft) appendConfigurationEntry(future *configurationChangeFuture) {
 	}
 
 	r.dispatchLogs([]*logFuture{&future.logFuture})
-	if bug("config-only-if-stored") && r.getState() != Leader {
+	if dstbugs.Fix("config-only-if-stored") && r.getState() != Leader {
 		// Storing the entry failed: dispatchLogs answered the future with
 		// the error and stepped down. The configuration never reached the
 		// log, so it isn't this node's.
@@ -1611,7 +1612,7 @@ func (r *Raft) processLogs(index uint64, futures map[uint64]*logFuture) {
 			// If we have a log ready to send to the FSM add it to the batch.
 			// The FSM thread will respond to the future.
 			batch = append(batch, preparedLog)
-			if bug("apply-entry-twice") && idx%50 == 0 {
+			if dstbugs.Bug("apply-entry-twice") && idx%50 == 0 {
 				batch = append(batch, preparedLog)
 			}
 
@@ -1761,14 +1762,14 @@ func (r *Raft) appendEntriesOn(rpc RPC, a *AppendEntriesRequest, heartbeat bool)
 	}()
 
 	// Ignore an older term
-	if a.Term < r.getCurrentTerm() && !bug("accept-stale-leader") {
+	if a.Term < r.getCurrentTerm() && !dstbugs.Bug("accept-stale-leader") {
 		return
 	}
 
 	// Increase the term if we see a newer one, also transition to follower
 	// if we ever get an appendEntries call
 	if a.Term > r.getCurrentTerm() || (r.getState() != Follower && !r.candidateFromLeadershipTransfer.Load()) {
-		if heartbeat && bug("heartbeat-on-main-thread") {
+		if heartbeat && dstbugs.Fix("heartbeat-on-main-thread") {
 			// Changing the term or the state is the main loop's job.
 			forwarded = true
 			r.rpcCh.Send(rpc)
@@ -1794,7 +1795,7 @@ func (r *Raft) appendEntriesOn(rpc RPC, a *AppendEntriesRequest, heartbeat bool)
 		snapIdx, _ := r.getLastSnapshot()
 		if a.PrevLogEntry == lastIdx {
 			prevLogTerm = lastTerm
-		} else if bug("snapshot-boundary-fix") && a.PrevLogEntry <= snapIdx {
+		} else if dstbugs.Fix("snapshot-boundary-fix") && a.PrevLogEntry <= snapIdx {
 			prevLogTerm = a.PrevLogTerm // committed: the leader's entry is ours
 		} else {
 			var prevLog Log
@@ -1809,7 +1810,7 @@ func (r *Raft) appendEntriesOn(rpc RPC, a *AppendEntriesRequest, heartbeat bool)
 			prevLogTerm = prevLog.Term
 		}
 
-		if a.PrevLogTerm != prevLogTerm && !bug("skip-prev-log-term") {
+		if a.PrevLogTerm != prevLogTerm && !dstbugs.Bug("skip-prev-log-term") {
 			r.logger.Warn("previous log term mis-match",
 				"ours", prevLogTerm,
 				"remote", a.PrevLogTerm)
@@ -1827,7 +1828,7 @@ func (r *Raft) appendEntriesOn(rpc RPC, a *AppendEntriesRequest, heartbeat bool)
 		snapshotIdx, _ := r.getLastSnapshot()
 		var newEntries []*Log
 		for i, entry := range a.Entries {
-			if bug("snapshot-boundary-fix") && entry.Index <= snapshotIdx {
+			if dstbugs.Fix("snapshot-boundary-fix") && entry.Index <= snapshotIdx {
 				continue // committed, and in our snapshot
 			}
 			if entry.Index > lastLogIdx {
@@ -1889,7 +1890,7 @@ func (r *Raft) appendEntriesOn(rpc RPC, a *AppendEntriesRequest, heartbeat bool)
 	}
 
 	// Update the commit index
-	if a.LeaderCommitIndex > 0 && a.LeaderCommitIndex > r.getCommitIndex() && !bug("follower-ignores-commit") {
+	if a.LeaderCommitIndex > 0 && a.LeaderCommitIndex > r.getCommitIndex() && !dstbugs.Bug("follower-ignores-commit") {
 		start := r.w.Now()
 		idx := min(a.LeaderCommitIndex, r.getLastIndex())
 		r.setCommitIndex(idx)
@@ -1967,7 +1968,7 @@ func (r *Raft) requestVote(rpc RPC, req *RequestVoteRequest) {
 		candidateID := ServerID(req.ID)
 		// if the Servers list is empty that mean the cluster is very likely trying to bootstrap,
 		// Grant the vote
-		if len(r.configurations.latest.Servers) > 0 && !inConfiguration(r.configurations.latest, candidateID) && !bug("no-candidate-config-check") && !(bug("candidate-check-unless-ahead") && candidateAhead(r, req.LastLogTerm, req.LastLogIndex)) {
+		if len(r.configurations.latest.Servers) > 0 && !inConfiguration(r.configurations.latest, candidateID) && !dstbugs.Bug("no-candidate-config-check") && !(dstbugs.Fix("candidate-check-unless-ahead") && candidateAhead(r, req.LastLogTerm, req.LastLogIndex)) {
 			r.logger.Warn("rejecting vote request since node is not in configuration",
 				"from", candidate)
 			return
@@ -2003,7 +2004,7 @@ func (r *Raft) requestVote(rpc RPC, req *RequestVoteRequest) {
 	// More details about that in https://github.com/hashicorp/raft/pull/526
 	if len(req.ID) > 0 {
 		candidateID := ServerID(req.ID)
-		if len(r.configurations.latest.Servers) > 0 && !hasVote(r.configurations.latest, candidateID) && !bug("nonvoter-can-lead") && !bug("no-candidate-config-check") && !(bug("candidate-check-unless-ahead") && candidateAhead(r, req.LastLogTerm, req.LastLogIndex)) {
+		if len(r.configurations.latest.Servers) > 0 && !hasVote(r.configurations.latest, candidateID) && !dstbugs.Bug("nonvoter-can-lead") && !dstbugs.Bug("no-candidate-config-check") && !(dstbugs.Fix("candidate-check-unless-ahead") && candidateAhead(r, req.LastLogTerm, req.LastLogIndex)) {
 			r.logger.Warn("rejecting vote request since node is not a voter", "from", candidate)
 			return
 		}
@@ -2021,7 +2022,7 @@ func (r *Raft) requestVote(rpc RPC, req *RequestVoteRequest) {
 	}
 
 	// Check if we've voted in this election before
-	if lastVoteTerm == req.Term && lastVoteCandBytes != nil && !bug("vote-twice") {
+	if lastVoteTerm == req.Term && lastVoteCandBytes != nil && !dstbugs.Bug("vote-twice") {
 		r.logger.Info("duplicate requestVote for same term", "term", req.Term)
 		if bytes.Equal(lastVoteCandBytes, candidateBytes) {
 			r.logger.Warn("duplicate requestVote from", "candidate", candidate)
@@ -2033,7 +2034,7 @@ func (r *Raft) requestVote(rpc RPC, req *RequestVoteRequest) {
 
 	// Reject if their term is older
 	lastIdx, lastTerm := r.getLastEntry()
-	if lastTerm > req.LastLogTerm && !bug("vote-ignores-log") {
+	if lastTerm > req.LastLogTerm && !dstbugs.Bug("vote-ignores-log") {
 		r.logger.Warn("rejecting vote request since our last term is greater",
 			"candidate", candidate,
 			"last-term", lastTerm,
@@ -2041,7 +2042,7 @@ func (r *Raft) requestVote(rpc RPC, req *RequestVoteRequest) {
 		return
 	}
 
-	if lastTerm == req.LastLogTerm && lastIdx > req.LastLogIndex && !bug("vote-ignores-log") {
+	if lastTerm == req.LastLogTerm && lastIdx > req.LastLogIndex && !dstbugs.Bug("vote-ignores-log") {
 		r.logger.Warn("rejecting vote request since our last index is greater",
 			"candidate", candidate,
 			"last-index", lastIdx,
@@ -2082,7 +2083,7 @@ func (r *Raft) requestPreVote(rpc RPC, req *RequestPreVoteRequest) {
 
 	// if the Servers list is empty that mean the cluster is very likely trying to bootstrap,
 	// Grant the vote
-	if len(r.configurations.latest.Servers) > 0 && !inConfiguration(r.configurations.latest, candidateID) && !bug("no-candidate-config-check") && !(bug("candidate-check-unless-ahead") && candidateAhead(r, req.LastLogTerm, req.LastLogIndex)) {
+	if len(r.configurations.latest.Servers) > 0 && !inConfiguration(r.configurations.latest, candidateID) && !dstbugs.Bug("no-candidate-config-check") && !(dstbugs.Fix("candidate-check-unless-ahead") && candidateAhead(r, req.LastLogTerm, req.LastLogIndex)) {
 		r.logger.Warn("rejecting pre-vote request since node is not in configuration",
 			"from", candidate)
 		return
@@ -2109,14 +2110,14 @@ func (r *Raft) requestPreVote(rpc RPC, req *RequestPreVoteRequest) {
 
 	// if we get a request for a pre-vote from a nonVoter  and the request term is higher, do not grant the Pre-Vote
 	// This could happen when a node, previously voter, is converted to non-voter
-	if len(r.configurations.latest.Servers) > 0 && !hasVote(r.configurations.latest, candidateID) && !bug("nonvoter-can-lead") && !bug("no-candidate-config-check") && !(bug("candidate-check-unless-ahead") && candidateAhead(r, req.LastLogTerm, req.LastLogIndex)) {
+	if len(r.configurations.latest.Servers) > 0 && !hasVote(r.configurations.latest, candidateID) && !dstbugs.Bug("nonvoter-can-lead") && !dstbugs.Bug("no-candidate-config-check") && !(dstbugs.Fix("candidate-check-unless-ahead") && candidateAhead(r, req.LastLogTerm, req.LastLogIndex)) {
 		r.logger.Warn("rejecting pre-vote request since node is not a voter", "from", candidate)
 		return
 	}
 
 	// Reject if their term is older
 	lastIdx, lastTerm := r.getLastEntry()
-	if lastTerm > req.LastLogTerm && !bug("vote-ignores-log") {
+	if lastTerm > req.LastLogTerm && !dstbugs.Bug("vote-ignores-log") {
 		r.logger.Warn("rejecting pre-vote request since our last term is greater",
 			"candidate", candidate,
 			"last-term", lastTerm,
@@ -2124,7 +2125,7 @@ func (r *Raft) requestPreVote(rpc RPC, req *RequestPreVoteRequest) {
 		return
 	}
 
-	if lastTerm == req.LastLogTerm && lastIdx > req.LastLogIndex && !bug("vote-ignores-log") {
+	if lastTerm == req.LastLogTerm && lastIdx > req.LastLogIndex && !dstbugs.Bug("vote-ignores-log") {
 		r.logger.Warn("rejecting pre-vote request since our last index is greater",
 			"candidate", candidate,
 			"last-index", lastIdx,
@@ -2196,7 +2197,7 @@ func (r *Raft) installSnapshot(rpc RPC, req *InstallSnapshotRequest) {
 		}
 		reqConfigurationIndex = req.LastLogIndex
 	}
-	if bug("snapshot-boundary-fix") && r.holdsEntry(req.LastLogIndex, req.LastLogTerm) {
+	if dstbugs.Fix("snapshot-boundary-fix") && r.holdsEntry(req.LastLogIndex, req.LastLogTerm) {
 		// Figure 13, rule 6: we hold the snapshot's last entry, so we
 		// continue from it without installing.
 		resp.Success = true
@@ -2280,7 +2281,7 @@ func (r *Raft) installSnapshot(rpc RPC, req *InstallSnapshotRequest) {
 	r.setLatestConfiguration(reqConfiguration, reqConfigurationIndex)
 	r.setCommittedConfiguration(reqConfiguration, reqConfigurationIndex)
 
-	if bug("snapshot-install-rule7") {
+	if dstbugs.Fix("snapshot-install-rule7") {
 		var l Log
 		if err := r.logs.GetLog(req.LastLogIndex, &l); err != nil || l.Term != req.LastLogTerm {
 			// Figure 13 rule 7: the log doesn't hold the snapshot's last

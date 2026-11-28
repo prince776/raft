@@ -6,6 +6,7 @@ package raft
 import (
 	"bytes"
 	"fmt"
+	"github.com/prince776/go-dst-kit/realworld"
 	"io"
 
 	"github.com/prince776/go-dst-kit/dst"
@@ -117,7 +118,7 @@ func (s *InmemSnapshotSink) Cancel() error {
 
 func (m *InmemSnapshotStore) world() *dst.World {
 	if m.w == nil {
-		return theRealWorld()
+		return realworld.Default()
 	}
 	return m.w
 }

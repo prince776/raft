@@ -5,11 +5,13 @@ package raft
 
 import (
 	"errors"
+	"github.com/prince776/go-dst-kit/realworld"
 	"io"
 	"net"
 	"time"
 
 	"github.com/hashicorp/go-hclog"
+	"github.com/prince776/go-dst-kit/dst"
 )
 
 var (
@@ -68,7 +70,7 @@ func newTCPTransport(bindAddr string,
 	advertise net.Addr,
 	transportCreator func(stream StreamLayer) *NetworkTransport) (*NetworkTransport, error) {
 	// Try to bind
-	list, err := net.Listen("tcp", bindAddr)
+	list, err := realworld.Default().Net().Listen("tcp", bindAddr)
 	if err != nil {
 		return nil, err
 	}
@@ -97,7 +99,7 @@ func newTCPTransport(bindAddr string,
 
 // Dial implements the StreamLayer interface.
 func (t *TCPStreamLayer) Dial(address ServerAddress, timeout time.Duration) (net.Conn, error) {
-	return net.DialTimeout("tcp", string(address), timeout)
+	return dst.DialTimeout(realworld.Default(), "tcp", string(address), timeout)
 }
 
 // Accept implements the net.Listener interface.

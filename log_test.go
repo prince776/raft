@@ -11,6 +11,7 @@ import (
 
 	metrics "github.com/hashicorp/go-metrics"
 	"github.com/prince776/go-dst-kit/dst"
+	"github.com/prince776/go-dst-kit/realworld"
 )
 
 func TestOldestLog(t *testing.T) {
@@ -73,14 +74,14 @@ func TestOldestLog(t *testing.T) {
 func TestEmitsLogStoreMetrics(t *testing.T) {
 	sink := testSetupMetrics(t)
 
-	start := theRealWorld().Now()
+	start := realworld.Default().Now()
 
 	s := NewInmemStore()
 	logs := []*Log{
 		{
 			Index:      1234,
 			Term:       1,
-			AppendedAt: theRealWorld().Now(),
+			AppendedAt: realworld.Default().Now(),
 		},
 		{
 			Index: 1235,
@@ -95,21 +96,21 @@ func TestEmitsLogStoreMetrics(t *testing.T) {
 		t.Fatalf("expected store logs not to fail: %s", err)
 	}
 
-	stopCh := dst.MakeChan[struct{}](theRealWorld(), 0)
+	stopCh := dst.MakeChan[struct{}](realworld.Default(), 0)
 	defer stopCh.Close()
 
 	{
 		goArg7 := []string{"foo"}
-		theRealWorld().Go(func() { emitLogStoreMetrics(theRealWorld(), s, goArg7, time.Millisecond, stopCh) })
+		realworld.Default().Go(func() { emitLogStoreMetrics(realworld.Default(), s, goArg7, time.Millisecond, stopCh) })
 	}
 
 	// Wait for at least one interval
-	theRealWorld().Sleep(5 * time.Millisecond)
+	realworld.Default().Sleep(5 * time.Millisecond)
 
 	got := getCurrentGaugeValue(t, sink, "raft.test.foo.oldestLogAge")
 
 	// Assert the age is in a reasonable range.
-	if got > float32(theRealWorld().Since(start).Milliseconds()) {
+	if got > float32(realworld.Default().Since(start).Milliseconds()) {
 		t.Fatalf("max age before test start: %v", got)
 	}
 

@@ -8,6 +8,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"github.com/prince776/go-dst-kit/realworld"
 	"io"
 	"net"
 	"os"
@@ -256,7 +257,7 @@ func NewNetworkTransportWithConfig(
 	}
 	w := config.World
 	if w == nil {
-		w = theRealWorld()
+		w = realworld.Default()
 	}
 	trans := &NetworkTransport{
 		w:                       w,

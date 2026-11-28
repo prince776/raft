@@ -90,15 +90,11 @@ func (b *bufferedFile) Close() error {
 // on a base directory. The `retain` parameter controls how many
 // snapshots are retained. Must be at least 1.
 func NewFileSnapshotStoreWithLogger(base string, retain int, logger hclog.Logger) (*FileSnapshotStore, error) {
-	w, rel, err := realWorldAt(base)
-	if err != nil {
-		return nil, fmt.Errorf("snapshot path not accessible: %v", err)
-	}
-	return NewFileSnapshotStoreWithWorld(w, rel, retain, logger)
+	return NewFileSnapshotStoreWithWorld(realworld.Default(), base, retain, logger)
 }
 
 // NewFileSnapshotStoreWithWorld is NewFileSnapshotStoreWithLogger keeping
-// the snapshots on w's filesystem, under base (relative to its root).
+// the snapshots on w's filesystem, under base.
 func NewFileSnapshotStoreWithWorld(w *dst.World, base string, retain int, logger hclog.Logger) (*FileSnapshotStore, error) {
 	if retain < 1 {
 		return nil, fmt.Errorf("must retain at least one snapshot")
@@ -567,29 +563,7 @@ func (s snapMetaSlice) Swap(i, j int) {
 
 func (f *FileSnapshotStore) world() *dst.World {
 	if f.w == nil {
-		return theRealWorld()
+		return realworld.Default()
 	}
 	return f.w
-}
-
-// realWorldAt returns the real World rooted at the filesystem's root and
-// dir's path in it. dir is created if missing and its symbolic links
-// resolved (a World's root refuses absolute ones, such as macOS's /var).
-func realWorldAt(dir string) (*dst.World, string, error) {
-	if err := os.MkdirAll(dir, 0o755); err != nil { //dst:ok the real World's root
-		return nil, "", err
-	}
-	abs, err := filepath.Abs(dir)
-	if err == nil {
-		abs, err = filepath.EvalSymlinks(abs)
-	}
-	if err != nil {
-		return nil, "", err
-	}
-	root := filepath.VolumeName(abs) + string(filepath.Separator)
-	rel, err := filepath.Rel(root, abs)
-	if err != nil {
-		return nil, "", err
-	}
-	return realworld.New(realworld.Options{Dir: root}), rel, nil
 }

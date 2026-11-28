@@ -170,19 +170,19 @@ func boundaryInstallProblems(t *testing.T) (problems []string) {
 // Fails if: correct raft passes either case (nothing left to show), or
 // the fix fails either.
 func TestSnapshotBoundaryScripted(t *testing.T) {
-	defer func() { activeBug = "" }()
+	defer setSwitches("")
 	for _, tc := range []struct {
 		name string
 		run  func(*testing.T) []string
 	}{{"append after the follower's snapshot", boundaryAppendProblems}, {"older snapshot installed", boundaryInstallProblems}} {
 		t.Run(tc.name, func(t *testing.T) {
-			activeBug = ""
+			setSwitches("")
 			if p := tc.run(t); len(p) == 0 {
 				t.Errorf("correct raft passed")
 			} else {
 				t.Logf("correct raft: %v", p)
 			}
-			activeBug = "snapshot-boundary-fix"
+			setSwitches("snapshot-boundary-fix")
 			if p := tc.run(t); len(p) > 0 {
 				t.Errorf("with the fix: %v", p)
 			}
@@ -199,7 +199,7 @@ func TestSnapshotBoundaryScripted(t *testing.T) {
 // Fails if: correct raft doesn't panic (nothing left to show), or with
 // snapshot-fallback-needs-log NewRaft panics instead of returning an error.
 func TestSnapshotFallbackGap(t *testing.T) {
-	defer func() { activeBug = "" }()
+	defer setSwitches("")
 	start := func(t *testing.T) (panicked any, err error) {
 		dir := t.TempDir()
 		conf := inmemConfig(t)
@@ -260,13 +260,13 @@ func TestSnapshotFallbackGap(t *testing.T) {
 		}
 		return nil, err
 	}
-	activeBug = ""
+	setSwitches("")
 	if p, err := start(t); p == nil {
 		t.Errorf("correct raft didn't panic (err %v)", err)
 	} else {
 		t.Logf("correct raft panicked: %v", p)
 	}
-	activeBug = "snapshot-fallback-needs-log"
+	setSwitches("snapshot-fallback-needs-log")
 	if p, err := start(t); p != nil {
 		t.Errorf("with the fix, NewRaft panicked: %v", p)
 	} else if err == nil {
@@ -406,7 +406,7 @@ func removedCampaignScript(preVoteOff, demote bool) func(h *dsttest.Harness) {
 // or the script never ran, or the server never came back with a higher
 // term without pre-vote (the scenario wouldn't test anything).
 func TestRemovedServerCampaigns(t *testing.T) {
-	defer func() { activeBug = "" }()
+	defer setSwitches("")
 	o := dstOpts(dsttest.Faults{})
 	o.Seeds, o.KeepGoing, o.DeterminismChecks = 20, true, -1
 	for _, c := range []struct {
@@ -424,7 +424,7 @@ func TestRemovedServerCampaigns(t *testing.T) {
 		{"demoted, bug 1's fix, pre-vote off", "candidate-check-unless-ahead", true, true, "pass"},
 		{"demoted, #526's checks removed, pre-vote off", "no-candidate-config-check", true, true, ""},
 	} {
-		activeBug = c.bug
+		setSwitches(c.bug)
 		rep := dsttest.Sweep(o, removedCampaignScript(c.preVoteOff, c.demote))
 		disrupted := 0
 		for _, r := range rep.Failed {
@@ -579,8 +579,8 @@ func pipelineStall(t *testing.T) (stalled, shutdownHung bool) {
 //
 // Fails if: correct raft never stalls (nothing to show), or the fix stalls.
 func TestPipelineStall(t *testing.T) {
-	defer func() { activeBug = "" }()
-	activeBug = ""
+	defer setSwitches("")
+	setSwitches("")
 	stalls, hung := 0, 0
 	for i := 0; i < 5; i++ {
 		s, h := pipelineStall(t)
@@ -595,7 +595,7 @@ func TestPipelineStall(t *testing.T) {
 		t.Errorf("correct raft never stalled in 5 tries")
 	}
 	t.Logf("correct raft: the follower stalled in %d of 5 tries; Shutdown hung in %d", stalls, hung)
-	activeBug = "pipeline-close-on-abort"
+	setSwitches("pipeline-close-on-abort")
 	for i := 0; i < 5; i++ {
 		if s, h := pipelineStall(t); s || h {
 			t.Errorf("with the fix, try %d: stalled %v, Shutdown hung %v", i+1, s, h)
@@ -693,8 +693,8 @@ func failedConfigWrite(t *testing.T) (latest Configuration, inLog bool) {
 // Fails if: upstream doesn't keep the phantom configuration (nothing to
 // show), or the fix keeps it.
 func TestFailedConfigWrite(t *testing.T) {
-	defer func() { activeBug = "" }()
-	activeBug = ""
+	defer setSwitches("")
+	setSwitches("")
 	latest, inLog := failedConfigWrite(t)
 	demoted := false
 	for _, s := range latest.Servers {
@@ -705,7 +705,7 @@ func TestFailedConfigWrite(t *testing.T) {
 	if !demoted || inLog {
 		t.Errorf("upstream: expected the unstored demotion in the latest configuration and not in the log; latest %v, in log %v", latest.Servers, inLog)
 	}
-	activeBug = "config-only-if-stored"
+	setSwitches("config-only-if-stored")
 	latest, inLog = failedConfigWrite(t)
 	for _, s := range latest.Servers {
 		if s.Suffrage == Nonvoter && !inLog {

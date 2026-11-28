@@ -4,6 +4,7 @@
 package raft
 
 import (
+	"github.com/prince776/go-dst-kit/realworld"
 	"testing"
 	"time"
 
@@ -12,7 +13,7 @@ import (
 
 func TestSaturationMetric(t *testing.T) {
 	t.Run("without smoothing", func(t *testing.T) {
-		sat := newSaturationMetric(theRealWorld(), []string{"metric"}, 100*time.Millisecond)
+		sat := newSaturationMetric(realworld.Default(), []string{"metric"}, 100*time.Millisecond)
 
 		now := sat.lastReport
 		sat.nowFn = func() time.Time { return now }
@@ -53,7 +54,7 @@ func TestSaturationMetric(t *testing.T) {
 
 func TestSaturationMetric_IncorrectUsage(t *testing.T) {
 	t.Run("calling sleeping() consecutively", func(t *testing.T) {
-		sat := newSaturationMetric(theRealWorld(), []string{"metric"}, 50*time.Millisecond)
+		sat := newSaturationMetric(realworld.Default(), []string{"metric"}, 50*time.Millisecond)
 
 		now := sat.lastReport
 		sat.nowFn = func() time.Time { return now }
@@ -93,7 +94,7 @@ func TestSaturationMetric_IncorrectUsage(t *testing.T) {
 	})
 
 	t.Run("calling working() consecutively", func(t *testing.T) {
-		sat := newSaturationMetric(theRealWorld(), []string{"metric"}, 30*time.Millisecond)
+		sat := newSaturationMetric(realworld.Default(), []string{"metric"}, 30*time.Millisecond)
 
 		now := sat.lastReport
 		sat.nowFn = func() time.Time { return now }
@@ -125,7 +126,7 @@ func TestSaturationMetric_IncorrectUsage(t *testing.T) {
 	})
 
 	t.Run("calling working() first", func(t *testing.T) {
-		sat := newSaturationMetric(theRealWorld(), []string{"metric"}, 10*time.Millisecond)
+		sat := newSaturationMetric(realworld.Default(), []string{"metric"}, 10*time.Millisecond)
 
 		now := sat.lastReport
 		sat.nowFn = func() time.Time { return now }

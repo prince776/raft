@@ -7,6 +7,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"github.com/prince776/go-dst-kit/realworld"
 	"io"
 	"os"
 	"reflect"
@@ -786,7 +787,7 @@ func makeCluster(t *testing.T, opts *MakeClusterOpts) (*cluster, error) {
 		opts.Conf = inmemConfig(t)
 	}
 
-	w := theRealWorld()
+	w := realworld.Default()
 	c := &cluster{
 		w:             w,
 		observationCh: dst.MakeChan[Observation](w, 1024),

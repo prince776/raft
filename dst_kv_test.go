@@ -11,6 +11,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/prince776/go-dst-kit/dstbugs"
 	"io"
 	"maps"
 	"slices"
@@ -276,7 +277,7 @@ func endCall(call check.Call[check.KVInput, check.KVOutput], in check.KVInput, r
 func (c *kvClient) readIndex(key string) (kvResult, kvOutcome) {
 	h, w, r := c.h, c.w, c.r
 	term := r.getCurrentTerm()
-	if !c.naive && !bug("readindex-without-barrier") && c.barrierTerm != term {
+	if !c.naive && !dstbugs.Bug("readindex-without-barrier") && c.barrierTerm != term {
 		if r.Barrier(500*time.Millisecond).Error() != nil || r.getCurrentTerm() != term {
 			return kvResult{}, kvUnknown
 		}

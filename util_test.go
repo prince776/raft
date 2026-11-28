@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/prince776/go-dst-kit/dst"
+	"github.com/prince776/go-dst-kit/realworld"
 )
 
 // TestMsgpackEncodeTime ensures that we don't break backwards compatibility when updating go-msgpack with
@@ -33,18 +34,18 @@ func TestMsgpackEncodeTimeDefaultFormat(t *testing.T) {
 }
 
 func TestRandomTimeout(t *testing.T) {
-	start := theRealWorld().Now()
-	timeout := randomTimeout(theRealWorld(), time.Millisecond)
+	start := realworld.Default().Now()
+	timeout := randomTimeout(realworld.Default(), time.Millisecond)
 
 	{
 		var sel1 int
-		dst.Select(theRealWorld(),
+		dst.Select(realworld.Default(),
 			dst.OnRecv(timeout, func(_ time.Time, _ bool) { sel1 = 1 }),
-			dst.OnRecv(theRealWorld().After(3*time.Millisecond), func(_ time.Time, _ bool) { sel1 = 2 }),
+			dst.OnRecv(realworld.Default().After(3*time.Millisecond), func(_ time.Time, _ bool) { sel1 = 2 }),
 		)
 		switch sel1 {
 		case 1:
-			diff := theRealWorld().Since(start)
+			diff := realworld.Default().Since(start)
 			if diff < time.Millisecond {
 				t.Fatalf("fired early")
 			}
@@ -68,7 +69,7 @@ func TestNewSeed(t *testing.T) {
 }
 
 func TestRandomTimeout_NoTime(t *testing.T) {
-	timeout := randomTimeout(theRealWorld(), 0)
+	timeout := randomTimeout(realworld.Default(), 0)
 	if timeout != (dst.Chan[time.Time]{}) {
 		t.Fatalf("expected nil channel")
 	}
@@ -99,14 +100,14 @@ func TestMax(t *testing.T) {
 }
 
 func TestGenerateUUID(t *testing.T) {
-	prev := generateUUID(theRealWorld())
+	prev := generateUUID(realworld.Default())
 	re, err := regexp.Compile(`[\da-f]{8}-[\da-f]{4}-[\da-f]{4}-[\da-f]{4}-[\da-f]{12}`)
 	if err != nil {
 		t.Errorf("failed to copmile regex: %s", err)
 	}
 
 	for i := 0; i < 100; i++ {
-		id := generateUUID(theRealWorld())
+		id := generateUUID(realworld.Default())
 		if prev == id {
 			t.Fatalf("Should get a new ID!")
 		}
@@ -141,13 +142,13 @@ func TestBackoff(t *testing.T) {
 }
 
 func TestOverrideNotifyBool(t *testing.T) {
-	ch := dst.MakeChan[bool](theRealWorld(), 1)
+	ch := dst.MakeChan[bool](realworld.Default(), 1)
 
 	// sanity check - buffered channel don't have any values
 	{
 		var sel2 int
 		var sel2v1 bool
-		dst.Select(theRealWorld(),
+		dst.Select(realworld.Default(),
 			dst.OnRecv(ch, func(v bool, _ bool) { sel2 = 1; sel2v1 = v }),
 			dst.Default(func() { sel2 = 2 }),
 		)
@@ -166,7 +167,7 @@ func TestOverrideNotifyBool(t *testing.T) {
 	{
 		var sel3 int
 		var sel3v1 bool
-		dst.Select(theRealWorld(),
+		dst.Select(realworld.Default(),
 			dst.OnRecv(ch, func(v bool, _ bool) { sel3 = 1; sel3v1 = v }),
 			dst.Default(func() { sel3 = 2 }),
 		)
@@ -193,7 +194,7 @@ func TestOverrideNotifyBool(t *testing.T) {
 	{
 		var sel4 int
 		var sel4v1 bool
-		dst.Select(theRealWorld(),
+		dst.Select(realworld.Default(),
 			dst.OnRecv(ch, func(v bool, _ bool) { sel4 = 1; sel4v1 = v }),
 			dst.Default(func() { sel4 = 2 }),
 		)
@@ -214,7 +215,7 @@ func TestOverrideNotifyBool(t *testing.T) {
 	{
 		var sel5 int
 		var sel5v1 bool
-		dst.Select(theRealWorld(),
+		dst.Select(realworld.Default(),
 			dst.OnRecv(ch, func(v bool, _ bool) { sel5 = 1; sel5v1 = v }),
 			dst.Default(func() { sel5 = 2 }),
 		)

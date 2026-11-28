@@ -6,6 +6,7 @@ package raft
 import (
 	"errors"
 	"fmt"
+	"github.com/prince776/go-dst-kit/dstbugs"
 	"io"
 	"time"
 
@@ -264,7 +265,7 @@ func (r *Raft) compactLogsWithTrailing(snapIdx uint64, lastLogIdx uint64, traili
 	// at least `TrailingLogs` entries, but does not allow logs
 	// after the snapshot to be removed.
 	maxLog := min(snapIdx, lastLogIdx-trailingLogs)
-	if bug("compact-past-snapshot") {
+	if dstbugs.Bug("compact-past-snapshot") {
 		maxLog = lastLogIdx - trailingLogs // deletes entries the snapshot doesn't hold
 	}
 

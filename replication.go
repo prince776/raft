@@ -6,6 +6,7 @@ package raft
 import (
 	"errors"
 	"fmt"
+	"github.com/prince776/go-dst-kit/dstbugs"
 	"sync/atomic"
 	"time"
 
@@ -613,7 +614,7 @@ func (r *Raft) pipelineSend(s *followerReplication, p AppendPipeline, nextIdx *u
 // pipelineDecode is used to decode the responses of pipelined requests.
 func (r *Raft) pipelineDecode(s *followerReplication, p AppendPipeline, stopCh, finishCh dst.Chan[struct{}]) {
 	defer finishCh.Close()
-	if bug("pipeline-close-on-abort") {
+	if dstbugs.Fix("pipeline-close-on-abort") {
 		defer p.Close()
 	}
 	respCh := p.Consumer()

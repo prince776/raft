@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/prince776/go-dst-kit/dst"
+	"github.com/prince776/go-dst-kit/realworld"
 )
 
 const (
@@ -66,13 +67,13 @@ func TestTransport_AppendEntries(t *testing.T) {
 		}
 
 		// Listen for a request
-		theRealWorld().Go(func() {
+		realworld.Default().Go(func() {
 			{
 				var sel1 int
 				var sel1v1 RPC
-				dst.Select(theRealWorld(),
+				dst.Select(realworld.Default(),
 					dst.OnRecv(rpcCh, func(v RPC, _ bool) { sel1 = 1; sel1v1 = v }),
-					dst.OnRecv(theRealWorld().After(200*time.Millisecond), func(_ time.Time, _ bool) { sel1 = 2 }),
+					dst.OnRecv(realworld.Default().After(200*time.Millisecond), func(_ time.Time, _ bool) { sel1 = 2 }),
 				)
 				switch sel1 {
 				case 1:
@@ -141,14 +142,14 @@ func TestTransport_AppendEntriesPipeline(t *testing.T) {
 		}
 
 		// Listen for a request
-		theRealWorld().Go(func() {
+		realworld.Default().Go(func() {
 			for i := 0; i < 10; i++ {
 				{
 					var sel2 int
 					var sel2v1 RPC
-					dst.Select(theRealWorld(),
+					dst.Select(realworld.Default(),
 						dst.OnRecv(rpcCh, func(v RPC, _ bool) { sel2 = 1; sel2v1 = v }),
-						dst.OnRecv(theRealWorld().After(200*time.Millisecond), func(_ time.Time, _ bool) { sel2 = 2 }),
+						dst.OnRecv(realworld.Default().After(200*time.Millisecond), func(_ time.Time, _ bool) { sel2 = 2 }),
 					)
 					switch sel2 {
 					case 1:
@@ -195,9 +196,9 @@ func TestTransport_AppendEntriesPipeline(t *testing.T) {
 			{
 				var sel3 int
 				var sel3v1 AppendFuture
-				dst.Select(theRealWorld(),
+				dst.Select(realworld.Default(),
 					dst.OnRecv(respCh, func(v AppendFuture, _ bool) { sel3 = 1; sel3v1 = v }),
-					dst.OnRecv(theRealWorld().After(200*time.Millisecond), func(_ time.Time, _ bool) { sel3 = 2 }),
+					dst.OnRecv(realworld.Default().After(200*time.Millisecond), func(_ time.Time, _ bool) { sel3 = 2 }),
 				)
 				switch sel3 {
 				case 1:
@@ -235,13 +236,13 @@ func TestTransport_RequestVote(t *testing.T) {
 		}
 
 		// Listen for a request
-		theRealWorld().Go(func() {
+		realworld.Default().Go(func() {
 			{
 				var sel4 int
 				var sel4v1 RPC
-				dst.Select(theRealWorld(),
+				dst.Select(realworld.Default(),
 					dst.OnRecv(rpcCh, func(v RPC, _ bool) { sel4 = 1; sel4v1 = v }),
-					dst.OnRecv(theRealWorld().After(200*time.Millisecond), func(_ time.Time, _ bool) { sel4 = 2 }),
+					dst.OnRecv(realworld.Default().After(200*time.Millisecond), func(_ time.Time, _ bool) { sel4 = 2 }),
 				)
 				switch sel4 {
 				case 1:
@@ -304,13 +305,13 @@ func TestTransport_InstallSnapshot(t *testing.T) {
 		}
 
 		// Listen for a request
-		theRealWorld().Go(func() {
+		realworld.Default().Go(func() {
 			{
 				var sel5 int
 				var sel5v1 RPC
-				dst.Select(theRealWorld(),
+				dst.Select(realworld.Default(),
 					dst.OnRecv(rpcCh, func(v RPC, _ bool) { sel5 = 1; sel5v1 = v }),
-					dst.OnRecv(theRealWorld().After(200*time.Millisecond), func(_ time.Time, _ bool) { sel5 = 2 }),
+					dst.OnRecv(realworld.Default().After(200*time.Millisecond), func(_ time.Time, _ bool) { sel5 = 2 }),
 				)
 				switch sel5 {
 				case 1:

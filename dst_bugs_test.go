@@ -5,6 +5,7 @@ package raft
 import (
 	"errors"
 	"fmt"
+	"os"
 	"slices"
 	"strings"
 	"testing"
@@ -49,8 +50,8 @@ func TestDSTChecksCatchBugs(t *testing.T) {
 			dsttest.Faults{Partition: true, Network: true}, 3},
 	} {
 		t.Run(c.bug, func(t *testing.T) {
-			activeBug = c.bug
-			defer func() { activeBug = "" }()
+			setSwitches(c.bug)
+			defer setSwitches("")
 			// Ten seeds at a time, stopping once a check meant for the bug
 			// caught it (most do within the first ten): up to 50 seeds.
 			caught, failed, runs, firstErr := map[string]int{}, 0, 0, error(nil)
@@ -134,12 +135,12 @@ func quorumScript(h *dsttest.Harness) {
 func TestDSTQuorumOffByOneScripted(t *testing.T) {
 	o := dstOpts(dsttest.Faults{})
 	o.Seeds, o.KeepGoing, o.DeterminismChecks = 20, true, -1
-	activeBug = ""
+	setSwitches("")
 	if rep := dsttest.Sweep(o, quorumScript); len(rep.Failed) > 0 {
 		t.Fatalf("correct raft failed the script on %d of %d seeds: %v", len(rep.Failed), rep.Runs, rep.Failed[0].Err)
 	}
-	activeBug = "quorum-off-by-one"
-	defer func() { activeBug = "" }()
+	setSwitches("quorum-off-by-one")
+	defer setSwitches("")
 	rep := dsttest.Sweep(o, quorumScript)
 	if len(rep.Failed) == 0 {
 		t.Fatalf("with the bug, no seed of %d lost a write", rep.Runs)
@@ -224,7 +225,7 @@ func staleConfigScript(h *dsttest.Harness) {
 func TestDSTStaleConfigStall(t *testing.T) {
 	o := dstOpts(dsttest.Faults{})
 	o.Seeds, o.KeepGoing, o.DeterminismChecks = 20, true, -1
-	activeBug = ""
+	setSwitches("")
 	rep := dsttest.Sweep(o, staleConfigScript)
 	stalled := 0
 	for _, r := range rep.Failed {
@@ -237,9 +238,9 @@ func TestDSTStaleConfigStall(t *testing.T) {
 		t.Fatalf("correct raft recovered on all %d seeds", rep.Runs)
 	}
 	t.Logf("correct raft: no leader again on %d of %d seeds", stalled, rep.Runs)
-	defer func() { activeBug = "" }()
+	defer setSwitches("")
 	for _, fix := range []string{"no-candidate-config-check", "candidate-check-unless-ahead"} {
-		activeBug = fix
+		setSwitches(fix)
 		if rep := dsttest.Sweep(o, staleConfigScript); len(rep.Failed) > 0 {
 			t.Fatalf("with %s, %d of %d seeds still failed: %v", fix, len(rep.Failed), rep.Runs, rep.Failed[0].Err)
 		}
@@ -284,12 +285,12 @@ func TestBootstrapCrash(t *testing.T) {
 		hasState, _ = HasExistingState(store, store.InmemStore, NewInmemSnapshotStore())
 		return BootstrapCluster(conf, store, store.InmemStore, NewInmemSnapshotStore(), trans, cfg), hasState
 	}
-	defer func() { activeBug = "" }()
-	activeBug = ""
+	defer setSwitches("")
+	setSwitches("")
 	if again, hasState := try(); !errors.Is(again, ErrCantBootstrap) || !hasState {
 		t.Fatalf("correct raft: bootstrapping again gave %v (has state %v); want ErrCantBootstrap", again, hasState)
 	}
-	activeBug = "bootstrap-log-first"
+	setSwitches("bootstrap-log-first")
 	if again, hasState := try(); again != nil || hasState {
 		t.Fatalf("with bootstrap-log-first: bootstrapping again gave %v (has state %v); want success", again, hasState)
 	}
@@ -304,8 +305,8 @@ func TestBootstrapCrash(t *testing.T) {
 //
 // Fails if: any seed fails with knownFixes on.
 func TestDSTMembershipGrayFixed(t *testing.T) {
-	activeBug = knownFixes
-	defer func() { activeBug = "" }()
+	setSwitches(knownFixes)
+	defer setSwitches("")
 	dsttest.Run(t, dstOpts(dsttest.Faults{Crash: true, Disk: true, Partition: true, Network: true, Loss: true, Gray: true}),
 		func(h *dsttest.Harness) { membershipClusterWith(h, true, true) })
 }
@@ -316,13 +317,35 @@ func TestDSTMembershipGrayFixed(t *testing.T) {
 //
 // Fails if: any seed fails with knownFixes on.
 func TestDSTDiskErrorsFixed(t *testing.T) {
-	activeBug = knownFixes
-	defer func() { activeBug = "" }()
+	setSwitches(knownFixes)
+	defer setSwitches("")
 	dsttest.Run(t, dstOpts(dsttest.Faults{Crash: true, Disk: true, DiskErrors: true}),
 		func(h *dsttest.Harness) { sweepCluster(h, 5) })
 }
 
 // knownFixes are the proposed fixes for the raft bugs found so far.
+// setSwitches turns on the named switches and only them, a comma-separated
+// list of plants and fixes: fixes (knownFixes' names) go to $DSTFIX,
+// everything else (plants, strict-checks) to $DSTBUG, which go-dst-kit's
+// dstbugs reads on every call. Tests switch for the whole process, one
+// set at a time.
+func setSwitches(names string) {
+	fix := strings.Split(knownFixes, ",")
+	var bugs, fixes []string
+	for _, n := range strings.Split(names, ",") {
+		if n = strings.TrimSpace(n); n == "" {
+			continue
+		}
+		if slices.Contains(fix, n) {
+			fixes = append(fixes, n)
+		} else {
+			bugs = append(bugs, n)
+		}
+	}
+	os.Setenv("DSTBUG", strings.Join(bugs, ","))
+	os.Setenv("DSTFIX", strings.Join(fixes, ","))
+}
+
 const knownFixes = "candidate-check-unless-ahead,bootstrap-log-first,snapshot-boundary-fix,snapshot-fallback-needs-log,heartbeat-on-main-thread,transfer-send-stoppable,pipeline-close-on-abort,snapshot-install-rule7,config-only-if-stored"
 
 // TestDSTMembershipFixed: the membership sweep with servers lost for good
@@ -332,8 +355,8 @@ const knownFixes = "candidate-check-unless-ahead,bootstrap-log-first,snapshot-bo
 //
 // Fails if: any seed fails with knownFixes on.
 func TestDSTMembershipFixed(t *testing.T) {
-	activeBug = knownFixes
-	defer func() { activeBug = "" }()
+	setSwitches(knownFixes)
+	defer setSwitches("")
 	dsttest.Run(t, dstOpts(dsttest.Faults{Crash: true, Disk: true, Partition: true, Network: true, Loss: true}),
 		func(h *dsttest.Harness) { membershipCluster(h, true) })
 }
@@ -354,9 +377,9 @@ func TestDSTMembershipFixed(t *testing.T) {
 //
 // Fails if: any seed fails with the fix.
 func TestDSTSnapshotBoundary(t *testing.T) {
-	defer func() { activeBug = "" }()
+	defer setSwitches("")
 	sweep := func(bug string) dsttest.Report {
-		activeBug = bug
+		setSwitches(bug)
 		o := dstOpts(dsttest.Faults{Crash: true, Disk: true, Partition: true, Network: true, Pause: true})
 		o.Seeds, o.KeepGoing, o.DeterminismChecks = 400, true, -1
 		return dsttest.Sweep(o, func(h *dsttest.Harness) {
@@ -377,8 +400,8 @@ func TestDSTSnapshotBoundary(t *testing.T) {
 // Fails if: with the bug (every 50th entry handed to the FSM twice), no
 // seed fails by that check.
 func TestDSTCatchesEntryAppliedTwice(t *testing.T) {
-	activeBug = "apply-entry-twice"
-	defer func() { activeBug = "" }()
+	setSwitches("apply-entry-twice")
+	defer setSwitches("")
 	o := dstOpts(dsttest.Faults{})
 	o.Seeds, o.KeepGoing, o.DeterminismChecks = 20, true, -1
 	rep := dsttest.Sweep(o, func(h *dsttest.Harness) { sweepCluster(h, 3) })
@@ -503,16 +526,16 @@ func manualRecoveryScript(noWhiteBox bool) func(h *dsttest.Harness) {
 // Fails if: correct raft loses an acknowledged write or fails otherwise
 // on any seed, or quorum-off-by-one loses none on any seed.
 func TestDSTManualRecovery(t *testing.T) {
-	defer func() { activeBug = "" }()
+	defer setSwitches("")
 	o := dstOpts(dsttest.Faults{Crash: true, Network: true})
 	o.Seeds, o.KeepGoing, o.DeterminismChecks = 50, true, -1
-	activeBug = ""
+	setSwitches("")
 	if rep := dsttest.Sweep(o, manualRecoveryScript(false)); !rep.OK() {
 		t.Fatalf("correct raft: %d of %d seeds failed; the first: %v", len(rep.Failed), rep.Runs, rep.Failed[0].Err)
 	} else {
 		t.Logf("correct raft: %d of %d seeds pass", rep.Runs, rep.Runs)
 	}
-	activeBug = "quorum-off-by-one"
+	setSwitches("quorum-off-by-one")
 	rep := dsttest.Sweep(o, manualRecoveryScript(true))
 	lost := 0
 	for _, r := range rep.Failed {

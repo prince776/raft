@@ -7,10 +7,8 @@ import (
 	"bytes"
 	crand "crypto/rand"
 	"fmt"
-	"github.com/prince776/go-dst-kit/realworld"
 	"math"
 	"math/big"
-	"sync"
 	"time"
 
 	"github.com/hashicorp/go-msgpack/v2/codec"
@@ -151,7 +149,3 @@ type uint64Slice []uint64
 func (p uint64Slice) Len() int           { return len(p) }
 func (p uint64Slice) Less(i, j int) bool { return p[i] < p[j] }
 func (p uint64Slice) Swap(i, j int)      { p[i], p[j] = p[j], p[i] }
-
-// theRealWorld is the real World, for code with no World of its own (a
-// default, or a test helper).
-var theRealWorld = sync.OnceValue(func() *dst.World { return realworld.New(realworld.Options{}) })

@@ -6,6 +6,8 @@ package raft
 import (
 	"errors"
 	"fmt"
+	"github.com/prince776/go-dst-kit/dstbugs"
+	"github.com/prince776/go-dst-kit/realworld"
 	"io"
 	"strconv"
 	"sync/atomic"
@@ -270,7 +272,7 @@ func BootstrapCluster(conf *Config, logs LogStore, stable StableStore,
 	}
 
 	// Set current term to 1.
-	if !bug("bootstrap-log-first") {
+	if !dstbugs.Fix("bootstrap-log-first") {
 		if err := stable.SetUint64(keyCurrentTerm, 1); err != nil {
 			return fmt.Errorf("failed to save current term: %v", err)
 		}
@@ -291,7 +293,7 @@ func BootstrapCluster(conf *Config, logs LogStore, stable StableStore,
 	if err := logs.StoreLog(entry); err != nil {
 		return fmt.Errorf("failed to append configuration entry to log: %v", err)
 	}
-	if bug("bootstrap-log-first") {
+	if dstbugs.Fix("bootstrap-log-first") {
 		if err := stable.SetUint64(keyCurrentTerm, 1); err != nil {
 			return fmt.Errorf("failed to save current term: %v", err)
 		}
@@ -519,7 +521,7 @@ func NewRaft(conf *Config, fsm FSM, logs LogStore, stable StableStore, snaps Sna
 	// The World raft runs in: the real one unless the config says.
 	w := conf.World
 	if w == nil {
-		w = theRealWorld()
+		w = realworld.Default()
 	}
 
 	// Validate the configuration.
@@ -532,7 +534,7 @@ func NewRaft(conf *Config, fsm FSM, logs LogStore, stable StableStore, snaps Sna
 
 	// Try to restore the current term.
 	currentTerm, err := stable.GetUint64(keyCurrentTerm)
-	if bug("forget-term-on-restart") {
+	if dstbugs.Bug("forget-term-on-restart") {
 		currentTerm = 0
 	}
 	if err != nil && err.Error() != "not found" {
@@ -629,7 +631,7 @@ func NewRaft(conf *Config, fsm FSM, logs LogStore, stable StableStore, snaps Sna
 
 	// Scan through the log for any configuration change entries.
 	snapshotIndex, _ := r.getLastSnapshot()
-	if bug("snapshot-fallback-needs-log") && !r.logFollows(snapshotIndex) {
+	if dstbugs.Fix("snapshot-fallback-needs-log") && !r.logFollows(snapshotIndex) {
 		first, _ := r.logs.FirstIndex()
 		return nil, fmt.Errorf("the log starts at %d, past the restored snapshot's index %d: a later snapshot couldn't be read", first, snapshotIndex)
 	}
@@ -675,7 +677,7 @@ func (r *Raft) restoreSnapshot() error {
 
 	// Try to load in order of newest to oldest
 	for _, snapshot := range snapshots {
-		if bug("snapshot-fallback-needs-log") && !r.logFollows(snapshot.Index) {
+		if dstbugs.Fix("snapshot-fallback-needs-log") && !r.logFollows(snapshot.Index) {
 			r.logger.Error("not restoring a snapshot the log was compacted past", "id", snapshot.ID, "last-index", snapshot.Index)
 			continue
 		}
