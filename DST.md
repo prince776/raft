@@ -1130,10 +1130,27 @@ found late (only voters, a raft-goroutine panic, a hang) not at all. A
 guided exploration has half the fresh roots, and most of these bugs depend
 on what a root draws (shape, configuration, fault mix).
 
-Diagnostics before any redesign (proposed): whether forking from the right
-point raises the failure rate at all (fork each failing run's prefix at each
-of its first-reached states, k times), and whether failures are preceded by
-rare states.
+**Diagnostics** (TestDSTPhase4Forks, 1000 plain seeds of upstream raft).
+Forks of a failing run, 5 per root per point, failing the same way:
+
+| Kind | Fresh | Step 1 | 10% | 25% | 50% | 75-90% |
+|---|---|---|---|---|---|---|
+| every member catches up | 1.5% | 8% | 8% | 28-32% | 100% | 100% |
+| members agree (6.18) | 0.3% | 0/15 | 0/15 | 33% | 93% | 100% |
+| terms never go back (6.13) | 2.0% | 4% | 12% | 8-20% | 16-20% | 32-36% |
+| cluster recovers; never finishes | 0.1% each | 0/5 | 5/5 | 5/5 | 5/5 | 5/5 |
+| "log not found" panic | 0.1% | 0/5 | 0/5 | 0-1/5 | 0/5 | 0/5 |
+
+A fork at step 1 keeps what setup drew (shape, configuration, fault mix)
+and re-draws the rest: about the fresh rate. So the root's draws don't
+decide these bugs (my reading above was wrong); the state the run reaches
+does, between 10% and 50% of the way in, and from there forks fail 30-100%
+of the time. Forking works; choosing what to fork doesn't.
+
+Does abstract-state rarity mark those runs? States reached by at most 5 of
+the 1000 runs, per run: passing 0.43; 6.18 6.67 (rarest reached by 16 runs
+against 42); catches up 1.0; 6.13 0.30; the rest 0. Only 6.18's path is
+rare in this abstraction, which fits guided finding it early once.
 
 ## 11. How to run
 
