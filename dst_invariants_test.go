@@ -117,7 +117,7 @@ func (iv *invariants) terms(c *simCluster) error {
 		term := nd.raft.getCurrentTerm()
 		if term < iv.maxTerm[nd.name] {
 			err := fmt.Errorf("%s's term went back from %d to %d", nd.name, iv.maxTerm[nd.name], term)
-			if !bug("heartbeat-on-main-thread") {
+			if !bug("heartbeat-on-main-thread") && !bug("strict-checks") {
 				// Upstream raft does this (DST.md 6.13: a heartbeat on the
 				// transport's goroutine steps the node back to its term).
 				// Counted, not failed, unless the fix is on.

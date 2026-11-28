@@ -968,6 +968,50 @@ break a lease anyway (drift is capped, and the jumps that would need a
 wall clock moving apart from the monotonic one aren't modelled). Clock
 jumps went on go-dst-kit's Todo instead. Phase 2 is closed.
 
+## 10b. Phase 3: how useful plain exploration is
+
+`TestDSTPhase3` (`dst_phase3_test.go`, dstbugs, `DST_PHASE3=1`): one
+combined sweep, not one per fault class. Every fault kind is on
+(`AllFaults` plus kills and losses; the swarm switches each off for a
+third of seeds), and each seed draws its cluster: 3, 4 or 5 fixed voters,
+or a membership cluster whose lost servers are replaced (a quarter of
+seeds), on raft's default timeouts whenever the seed drew gray failure.
+Each known bug runs until 5 seeds fail or its budget runs out; a real bug
+runs with its fix off (and `strict-checks`, so the two checks that only
+count upstream's 6.13 and 6.14 behaviour fail on it). A no-bug hunt of 300
+seeds passes, and reaches every fault and workload marker (crashes, kills,
+losses and replacements, partitions, pauses, gray links and machines,
+disk-full and EIO, torn writes and holes, snapshots, membership changes,
+transfers, client redirects and retries).
+
+A first design ran every bug through every fault class (about 250 cells,
+2-2.5 hours); Prince stopped it: most cells only confirmed which faults a
+bug needs. This run takes minutes.
+
+| Bug | Seeds to first failure (failing / run) |
+|---|---|
+| apply-entry-twice, follower-ignores-commit, forget-term-on-restart, quorum-off-by-one, vote-twice | 1 (8–25 of 25) |
+| readindex-without-barrier, transfer-flag-sticks, vote-ignores-log | 7–11 (5–6 of 25–75) |
+| skip-prev-log-term, accept-stale-leader | 20–24 (3–5 of 75–100) |
+| compact-past-snapshot | 171 (5 of 350) |
+| nonvoter-can-lead, two-changes-in-flight, config-change-before-noop, commit-previous-term | 294–467 (1 of 500) |
+| lease-counts-nonvoters | 90 (1 of 100) |
+| real: #695 heartbeat off the main loop (6.13) | 7 (4 of 300) |
+| real: #612 pipeline deadlock (6.16) | 50 (2 of 100) |
+| real: unreadable newest snapshot (6.12) | 208 (2 of 500) |
+| real: crash inside bootstrap (6.2) | 500 (1 of 500) |
+| real: stale-config stall (6.1), #696 stuck transfer (6.14), #697 rule 7 (6.17) | not found in 300–500 |
+| real: snapshot boundary (6.11) | not found in 500: it needs TrailingLogs 0, which the drawn configuration never uses (a gap in the world, not in exploration) |
+
+So plain exploration finds the shallow planted bugs at once, and the
+membership and snapshot ones rarely (1 in 300–500 seeds). It finds
+only 4 of the 8 real bugs within 500 seeds, while dedicated per-class
+sweeps found them at 1 in 50 to 1 in 250 (the combined sweep spreads its
+seeds over every fault kind). Phase 4's targets: 6.1, 6.14 (#696), 6.17
+(#697), and the rare membership plants; 6.11 needs TrailingLogs 0 drawn
+first. Not yet measured: the swarm itself (drawn per seed against
+pinned).
+
 ## 11. How to run
 
 The fork builds against a local go-dst-kit through a `go.work` (not

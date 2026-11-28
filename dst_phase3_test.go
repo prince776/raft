@@ -2,24 +2,21 @@
 
 package raft
 
-// Phase 3, measurement 1 (DST.md 12): how useful plain exploration is.
-// Every known bug (planted, or a real one with its fix switched off and
-// the other fixes on) runs through every plain sweep class; each cell
-// records how many seeds fail, the first failing seed, and which checks
-// caught it. A no-bug cell per class (every fix on) is the baseline: any
-// failure there is a new finding or a harness bug, not a detection.
+// Phase 3 (DST.md 12): how useful plain exploration is. One combined
+// sweep, not one per fault class: every fault kind is enabled and the
+// swarm switches each off for some seeds, and each seed draws the
+// cluster's shape (a fixed cluster of 3, 4 or 5 voters, or a membership
+// cluster whose servers are lost and replaced). Every known bug (planted,
+// or a real one with its fix switched off and the other fixes on) runs
+// through it until it has failed a few seeds or run out of seeds: the
+// result is whether plain exploration finds the bug, how soon (its first
+// failing seed), and by which checks. A no-bug run (every fix on) is the
+// hunt for anything new.
 //
-// A cell stops early, as soon as more seeds can't change what it shows:
-// once it has 20 failing seeds (the rate is known well enough, and its
-// first failing seed), or after the first 50 seeds if the bug's switch was
-// never reached (the class can't exercise that code). The no-bug cells
-// always run every seed: they're the hunt for anything new.
-//
-// Skipped unless DST_PHASE3=1. DST_PHASE3_SEEDS (default 400) sets the
-// seeds per cell; DST_PHASE3_OUT (default phase3/detection.tsv) gets one
-// line per cell as it finishes, and cells already in it are skipped, so a
-// stopped run resumes. DST_PHASE3_BUGS / DST_PHASE3_CLASSES narrow it
-// (comma-separated names).
+// Skipped unless DST_PHASE3=1. DST_PHASE3_OUT (default phase3/swarm.tsv)
+// gets one line per bug as it finishes; bugs already in it are skipped.
+// DST_PHASE3_BUGS narrows the run (comma-separated); DST_PHASE3_SEEDS
+// raises a bug's seed budget (default phase3BugSeeds).
 
 import (
 	"bufio"
@@ -37,36 +34,37 @@ import (
 	"github.com/prince776/go-dst-kit/dsttest"
 )
 
-type phase3Class struct {
-	name   string
-	opts   func() dsttest.Options
-	sweeps func(h *dsttest.Harness)
-}
+// The run's size: a bug gets at most phase3BugSeeds seeds and stops at
+// phase3EnoughFailures failing ones; the hunt runs phase3HuntSeeds.
+const (
+	phase3BugSeeds       = 100
+	phase3EnoughFailures = 5
+	phase3HuntSeeds      = 300
+	phase3Chunk          = 25
+)
 
-// phase3Classes are the plain sweeps of dst_test.go (and the fixed ones of
-// dst_bugs_test.go), with the same faults and clusters.
-func phase3Classes() []phase3Class {
-	f := func(fs dsttest.Faults) func() dsttest.Options { return func() dsttest.Options { return dstOpts(fs) } }
-	all := dsttest.Faults{Crash: true, Disk: true, Partition: true, Network: true, Pause: true}
-	return []phase3Class{
-		{"Smoke", f(dsttest.Faults{}), func(h *dsttest.Harness) { sweepCluster(h, 3) }},
-		{"Crashes", f(dsttest.Faults{Crash: true, Disk: true}), func(h *dsttest.Harness) { sweepCluster(h, 3) }},
-		{"Partitions", f(dsttest.Faults{Partition: true, Network: true}), func(h *dsttest.Harness) { sweepCluster(h, 3) }},
-		{"Everything", f(all), func(h *dsttest.Harness) { sweepCluster(h, 5) }},
-		{"DiskErrors", f(dsttest.Faults{Crash: true, Disk: true, DiskErrors: true}), func(h *dsttest.Harness) { sweepCluster(h, 5) }},
-		{"FourNodes", f(dsttest.Faults{Crash: true, Disk: true, Partition: true, Network: true}), func(h *dsttest.Harness) { sweepCluster(h, 4) }},
-		{"Membership", f(dsttest.Faults{Crash: true, Disk: true, Partition: true, Network: true, Loss: true}), func(h *dsttest.Harness) { membershipCluster(h, true) }},
-		{"MembershipGray", f(dsttest.Faults{Crash: true, Disk: true, Partition: true, Network: true, Loss: true, Gray: true}), func(h *dsttest.Harness) { membershipClusterWith(h, true, true) }},
-		{"Gray", f(dsttest.Faults{Crash: true, Disk: true, Partition: true, Network: true, Pause: true, Gray: true}), func(h *dsttest.Harness) {
-			newCluster(h, clusterSpec{voters: 5, defaultTimeouts: true, drawConfig: true})
-		}},
-		{"Clocks", func() dsttest.Options {
-			o := dstOpts(all)
-			o.Clock = dsttest.ClockOptions{MaxOffset: time.Hour, MaxDrift: 0.2}
-			return o
-		}, func(h *dsttest.Harness) { sweepCluster(h, 5) }},
+// phase3Setup is the combined sweep's setup: the cluster's shape drawn per
+// seed, raft's default timeouts under gray failure (slow links outlast a
+// fifth of them).
+func phase3Setup(h *dsttest.Harness) {
+	sw := h.Swarm()
+	gray := sw.SlowLinkShare > 0 || sw.LossyLinkShare > 0 || sw.SlowMachineShare > 0 || sw.SlowDiskShare > 0
+	switch shape := h.World().Rand().Stream("phase3 shape").IntN(4); shape {
+	case 0:
+		membershipClusterWith(h, gray, true)
+	default:
+		h.OnLoss(func(*dsttest.Machine) bool { return false }, nil) // a fixed cluster loses no server for good
+		newCluster(h, clusterSpec{voters: 2 + shape, defaultTimeouts: gray, drawConfig: true, clients: 2})
 	}
 }
+
+// phase3Faults: every fault class, server loss included (only membership
+// seeds accept a loss).
+var phase3Faults = func() dsttest.Faults {
+	f := dsttest.AllFaults
+	f.Loss, f.Kill = true, true
+	return f
+}()
 
 // phase3Planted are the bugs planted in raft (manual.py, dst_kv_test.go);
 // phase3Real are the real ones, measured by switching their fix off.
@@ -79,21 +77,21 @@ var phase3Planted = []string{
 
 func phase3Real() []string { return strings.Split(knownFixes, ",") }
 
-// phase3Switches returns the bug switches for a cell: "none" is every fix
+// phase3Switches returns the bug switches for a run: "none" is every fix
 // on; a planted bug is every fix plus it; "fix-off:F" is every fix but F.
 func phase3Switches(cell string) string {
-	fixes := phase3Real()
 	if f, ok := strings.CutPrefix(cell, "fix-off:"); ok {
-		fixes = slices.DeleteFunc(fixes, func(s string) bool { return s == f })
-		return strings.Join(fixes, ",")
+		// strict-checks: the two checks that count upstream's known
+		// behaviour instead of failing on it (6.13's term going back,
+		// 6.14's refusal after a stuck transfer) fail on it here, so a
+		// fix-off run can detect its bug.
+		return strings.Join(append(slices.DeleteFunc(phase3Real(), func(s string) bool { return s == f }), "strict-checks"), ",")
 	}
 	if cell == "none" {
 		return knownFixes
 	}
 	return knownFixes + "," + cell
 }
-
-const phase3Chunk, phase3EnoughFailures = 50, 20
 
 var phase3Check = regexp.MustCompile(`(?:check|invariant) "([^"]+)"`)
 
@@ -112,27 +110,14 @@ func phase3Why(err error) string {
 	return "other: " + s
 }
 
-func phase3Filter(env string) func(string) bool {
-	v := os.Getenv(env)
-	if v == "" {
-		return func(string) bool { return true }
-	}
-	set := strings.Split(v, ",")
-	return func(s string) bool { return slices.Contains(set, s) }
-}
-
-func TestDSTPhase3Detection(t *testing.T) {
+func TestDSTPhase3(t *testing.T) {
 	if os.Getenv("DST_PHASE3") != "1" {
 		t.Skip("phase 3 measurement: set DST_PHASE3=1")
 	}
 	defer func() { activeBug = "" }()
-	seeds := 400
-	if v := os.Getenv("DST_PHASE3_SEEDS"); v != "" {
-		seeds, _ = strconv.Atoi(v)
-	}
 	out := os.Getenv("DST_PHASE3_OUT")
 	if out == "" {
-		out = "phase3/detection.tsv"
+		out = "phase3/swarm.tsv"
 	}
 	if err := os.MkdirAll(filepath.Dir(out), 0o755); err != nil {
 		t.Fatal(err)
@@ -141,8 +126,8 @@ func TestDSTPhase3Detection(t *testing.T) {
 	if f, err := os.Open(out); err == nil {
 		sc := bufio.NewScanner(f)
 		for sc.Scan() {
-			if fs := strings.Split(sc.Text(), "\t"); len(fs) > 2 && fs[2] == strconv.Itoa(seeds) {
-				done[fs[0]+"\t"+fs[1]] = true
+			if fs := strings.Split(sc.Text(), "\t"); len(fs) > 1 {
+				done[fs[0]] = true
 			}
 		}
 		f.Close()
@@ -153,77 +138,92 @@ func TestDSTPhase3Detection(t *testing.T) {
 	}
 	defer f.Close()
 	if st, _ := f.Stat(); st.Size() == 0 {
-		fmt.Fprintln(f, "class\tbug\tseeds\tfailed\tfirst\tcaught_by\tnondeterministic\tnever_happened\twall\tran\tstopped")
+		fmt.Fprintln(f, "bug\tran\tfailed\tfirst\tcaught_by\tnondeterministic\twall\tnever_reached")
 	}
 	cells := []string{"none"}
 	cells = append(cells, phase3Planted...)
 	for _, fx := range phase3Real() {
 		cells = append(cells, "fix-off:"+fx)
 	}
-	wantBug, wantClass := phase3Filter("DST_PHASE3_BUGS"), phase3Filter("DST_PHASE3_CLASSES")
-	for _, c := range phase3Classes() {
-		if !wantClass(c.name) {
+	want := func(string) bool { return true }
+	if v := os.Getenv("DST_PHASE3_BUGS"); v != "" {
+		set := strings.Split(v, ",")
+		want = func(s string) bool { return slices.Contains(set, s) }
+	}
+	for _, cell := range cells {
+		if !want(cell) || done[cell] {
 			continue
 		}
-		for _, cell := range cells {
-			if !wantBug(cell) || done[c.name+"\t"+cell] {
-				continue
+		activeBug = phase3Switches(cell)
+		limit := phase3BugSeeds
+		if v, err := strconv.Atoi(os.Getenv("DST_PHASE3_SEEDS")); err == nil && v > 0 {
+			limit = v
+		}
+		if cell == "none" {
+			limit = phase3HuntSeeds
+		}
+		start := time.Now()
+		why := map[string]int{}
+		first, ran, failed, nondet := uint64(0), 0, 0, 0
+		cover := map[string]int{}
+		never := map[string]bool{}
+		for ran < limit && (cell == "none" || failed < phase3EnoughFailures) {
+			o := dsttest.Options{Faults: phase3Faults, FaultPhase: 10 * time.Second, RecoveryPhase: 10 * time.Second}
+			o.FirstSeed = uint64(ran + 1)
+			o.Seeds = phase3Chunk
+			if left := limit - ran; left < phase3Chunk {
+				o.Seeds = left
 			}
-			activeBug = phase3Switches(cell)
-			site := strings.TrimPrefix(cell, "fix-off:")
-			start := time.Now()
-			why := map[string]int{}
-			first, ran, failed, nondet := uint64(0), 0, 0, 0
-			never := map[string]bool{}
-			stop := ""
-			for ran < seeds {
-				before := bugSiteHits(site)
-				o := c.opts()
-				o.FirstSeed = uint64(ran + 1)
-				o.Seeds = phase3Chunk // raft's own min is for uint64
-				if left := seeds - ran; left < phase3Chunk {
-					o.Seeds = left
-				}
-				o.KeepGoing, o.DeterminismChecks = true, -1
-				rep := dsttest.Sweep(o, c.sweeps)
-				ran += rep.Runs
-				nondet += len(rep.Nondeterministic)
-				for _, n := range rep.NeverHappened {
-					never[n] = true
-				}
-				for _, r := range rep.Failed {
-					failed++
-					why[phase3Why(r.Err)]++
-					if first == 0 || r.Seed < first {
-						first = r.Seed
-					}
+			o.KeepGoing, o.DeterminismChecks = true, -1
+			rep := dsttest.Sweep(o, phase3Setup)
+			ran += rep.Runs
+			nondet += len(rep.Nondeterministic)
+			for k, n := range rep.Coverage {
+				cover[k] += n
+			}
+			for _, n := range rep.NeverHappened {
+				never[n] = true
+			}
+			for _, r := range rep.Failed {
+				failed++
+				why[phase3Why(r.Err)]++
+				if first == 0 || r.Seed < first {
+					first = r.Seed
 				}
 				if cell == "none" {
-					continue
-				}
-				if failed >= phase3EnoughFailures {
-					stop = "enough failures"
-					break
-				}
-				if ran == phase3Chunk && failed == 0 && bugSiteHits(site) == before {
-					stop = "switch never reached"
-					break
+					t.Logf("hunt: seed %d failed: %.300v", r.Seed, r.Err)
 				}
 			}
-			var caught []string
-			for k, n := range why {
-				caught = append(caught, fmt.Sprintf("%s=%d", k, n))
-			}
-			sort.Strings(caught)
-			var nevers []string
-			for n := range never {
+		}
+		var caught []string
+		for k, n := range why {
+			caught = append(caught, fmt.Sprintf("%s=%d", k, n))
+		}
+		sort.Strings(caught)
+		// An Expect-ed behaviour no seed reached makes the run vacuous for
+		// it: recorded, and a hunt that misses one fails.
+		var nevers []string
+		for n := range never {
+			if cover[n] == 0 {
 				nevers = append(nevers, n)
 			}
-			sort.Strings(nevers)
-			line := fmt.Sprintf("%s\t%s\t%d\t%d\t%d\t%s\t%d\t%s\t%s\t%d\t%s", c.name, cell, seeds, failed, first,
-				strings.Join(caught, "; "), nondet, strings.Join(nevers, "; "), time.Since(start).Round(time.Second), ran, stop)
-			fmt.Fprintln(f, line)
-			t.Log(line)
 		}
+		sort.Strings(nevers)
+		if cell == "none" {
+			var keys []string
+			for k := range cover {
+				keys = append(keys, k)
+			}
+			sort.Strings(keys)
+			for _, k := range keys {
+				t.Logf("hunt coverage: %6d  %s", cover[k], k)
+			}
+			if len(nevers) > 0 {
+				t.Errorf("the hunt never reached: %v", nevers)
+			}
+		}
+		line := fmt.Sprintf("%s\t%d\t%d\t%d\t%s\t%d\t%s\t%s", cell, ran, failed, first, strings.Join(caught, "; "), nondet, time.Since(start).Round(time.Second), strings.Join(nevers, "; "))
+		fmt.Fprintln(f, line)
+		t.Log(line)
 	}
 }

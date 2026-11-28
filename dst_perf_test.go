@@ -26,6 +26,26 @@ func cpuTime() time.Duration {
 	return time.Duration(ru.Utime.Nano() + ru.Stime.Nano())
 }
 
+type perfClass struct {
+	name   string
+	opts   dsttest.Options
+	sweeps func(h *dsttest.Harness)
+}
+
+// perfClasses are four plain sweeps, as dst_test.go and dst_bugs_test.go
+// define them (kept fixed: the fingerprints are compared across changes).
+func perfClasses() []perfClass {
+	all := dsttest.Faults{Crash: true, Disk: true, Partition: true, Network: true, Pause: true}
+	return []perfClass{
+		{"Everything", dstOpts(all), func(h *dsttest.Harness) { sweepCluster(h, 5) }},
+		{"DiskErrors", dstOpts(dsttest.Faults{Crash: true, Disk: true, DiskErrors: true}), func(h *dsttest.Harness) { sweepCluster(h, 5) }},
+		{"Membership", dstOpts(dsttest.Faults{Crash: true, Disk: true, Partition: true, Network: true, Loss: true}), func(h *dsttest.Harness) { membershipCluster(h, true) }},
+		{"Gray", dstOpts(dsttest.Faults{Crash: true, Disk: true, Partition: true, Network: true, Pause: true, Gray: true}), func(h *dsttest.Harness) {
+			newCluster(h, clusterSpec{voters: 5, defaultTimeouts: true, drawConfig: true})
+		}},
+	}
+}
+
 func TestDSTPerfBaseline(t *testing.T) {
 	out := os.Getenv("DST_PERF_OUT")
 	if out == "" {
@@ -41,12 +61,12 @@ func TestDSTPerfBaseline(t *testing.T) {
 	seeds := map[string]int{"Everything": 40, "Membership": 20, "DiskErrors": 20, "Gray": 20}
 	var total time.Duration
 	var steps uint64
-	for _, c := range phase3Classes() {
+	for _, c := range perfClasses() {
 		n, ok := seeds[c.name]
 		if !ok {
 			continue
 		}
-		o := c.opts()
+		o := c.opts
 		o.FirstSeed, o.Seeds, o.KeepGoing, o.DeterminismChecks = 1, n, true, -1
 		cpu0, wall0 := cpuTime(), time.Now()
 		rep := dsttest.Sweep(o, c.sweeps)
