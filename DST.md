@@ -1061,6 +1061,55 @@ seeds over every fault kind). Phase 4's targets: 6.1, 6.14 (#696), 6.17
 first. Not yet measured: the swarm itself (drawn per seed against
 pinned).
 
+## 10c. Phase 4: guided exploration (first measurement: no gain)
+
+The same combined sweep as phase 3, used as a hunt: 500 plain seeds
+against 500 guided runs (`dsttest.Explore`), on A (upstream raft: every
+known fix off, strict-checks on, so every real bug found so far is
+present) and B (every fix on). `TestDSTPhase4` (`DST_PHASE4=1`). New
+signal: the cluster's abstract state (`dst_state_test.go`, go-dst-kit's
+`Harness.State`): capped counts of leaders, candidates, nodes down,
+configuration changes in flight, disagreeing latest configurations,
+non-voters, logs overlapping or gapped after a snapshot, lagging commit
+indexes. Chosen from the protocol, not the bugs. (A per-node list was
+tried first: 5000 states in 40 runs, none recurring; counts give about 400
+in 500 runs.)
+
+A, distinct failure kinds (check plus signature) and abstract states
+reached, per 500 runs:
+
+| First seed | Plain | Guided, all signals | Guided, states only |
+|---|---|---|---|
+| 1 | 4 kinds, 387 states, 97 s cpu | 5 kinds, 398 states, 394 s | 3 kinds, 422 states, 126 s |
+| 1001 | 7 kinds, 426 states, 82 s | | 4 kinds, 457 states, 171 s |
+| 2001 | 11 kinds, 421 states, 68 s | | 5 kinds, 392 states, 74 s |
+
+B: no failure in any arm (plain 391 states, all signals 369, states 411).
+
+Reading:
+- No gain. From seed 1 guided looked better (6.18's "members agree" at runs
+  40 and 70 against none by plain; "every member catches up" at run 44
+  against 179). The two repeats reverse it: plain finds more kinds, and
+  each kind about as early or earlier.
+- Guided runs fail more often on the commonest bug (6.13, terms going back:
+  28 runs against 16, 18 against 12) and find fewer kinds. Forks of a
+  failing root fail the same way, as in go-dst-kit's earlier measurements.
+- Guided runs don't reach more abstract states (+9%, +7%, -7%). Steering
+  toward rare states doesn't widen coverage, so the explorer isn't doing
+  what it's for here. A likely reason: a fork keeps its root's cluster
+  shape, configuration and fault mix (drawn in setup), and most of the
+  state space, and these bugs, depend on those; only fresh seeds vary them.
+- Cost: all signals 4x plain's CPU (recording interleaving pairs: a stack
+  walk per scheduling point); states only 1.1-2x.
+- "log not found" panics in A (1-6 per 500, both arms) aren't attributed to
+  one bug yet; every phase 3 single-bug cell missed them, so they may need
+  two fixes off. Todo.
+
+Diagnostics before any redesign (proposed): whether forking from the right
+point raises the failure rate at all (fork each failing run's prefix at each
+of its first-reached states, k times), and whether failures are preceded by
+rare states.
+
 ## 11. How to run
 
 The fork builds against a local go-dst-kit through a `go.work` (not

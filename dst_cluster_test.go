@@ -248,6 +248,7 @@ func newCluster(h *dsttest.Harness, spec clusterSpec) *simCluster {
 	// Only disk-error panics: any other panic is still a failure.
 	h.OnPanic(func(v any) bool { return diskError(fmt.Errorf("%v", v)) })
 	c.inv = newInvariants()
+	h.State(c.abstractState) // guided exploration's abstract state (dst_state_test.go)
 	c.checks()
 	if !spec.noWhiteBox {
 		c.invariantChecks()
