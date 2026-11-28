@@ -1105,6 +1105,31 @@ Reading:
   one bug yet; every phase 3 single-bug cell missed them, so they may need
   two fixes off. Todo.
 
+**Second measurement** (Prince: don't overexplore one root; 500 may be too
+few). go-dst-kit c020e49: half the runs fresh, a root forked at most 8
+times without finding anything new, a feature's carriers from distinct
+roots. 2000 runs per arm, A, by states; the run each kind (by check) first
+failed, - for not found:
+
+| | Seed 1 plain | Seed 1 guided | Seed 1001 plain | Seed 1001 guided |
+|---|---|---|---|---|
+| terms never go back (6.13) | 94 | 93 | 2 | 2 |
+| every member catches up | 179 | 50 | 127 | 237 |
+| members agree on the configuration (6.18) | 780 | 138 | 152 | 157 |
+| the cluster recovers | 295 | 525 | 221 | 424 |
+| "log not found" panic | 462 | 865 | 372 | 42 |
+| run never finishes | 576 | 1080 | 1739 | - |
+| only voters are elected | - | - | 1873 | - |
+| panic in a raft goroutine | - | - | 1934 | - |
+| kinds / abstract states | 6 / 531 | 6 / 615 | 8 / 533 | 5 / 592 |
+
+Forks now spread (209 and 221 roots, at most 15 forks of one) and guided
+runs reach 11-16% more abstract states, but find no more kinds: some
+earlier (6.18 at 138 vs 780 once), some later, and the singletons plain
+found late (only voters, a raft-goroutine panic, a hang) not at all. A
+guided exploration has half the fresh roots, and most of these bugs depend
+on what a root draws (shape, configuration, fault mix).
+
 Diagnostics before any redesign (proposed): whether forking from the right
 point raises the failure rate at all (fork each failing run's prefix at each
 of its first-reached states, k times), and whether failures are preceded by

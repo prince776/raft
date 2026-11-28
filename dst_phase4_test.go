@@ -77,11 +77,22 @@ func TestDSTPhase4(t *testing.T) {
 			firstAt := map[string]int{}
 			failed, inconclusive := 0, 0
 			forks, depth := 0, 0
+			perRoot := map[uint64]int{}
 			for _, r := range rep.Results {
 				if k := len(r.Path.Forks); k > 0 {
 					forks++
 					depth += k
+					perRoot[r.Path.Seed]++
 				}
+			}
+			most := 0
+			for _, n := range perRoot {
+				if n > most {
+					most = n
+				}
+			}
+			if forks > 0 {
+				t.Logf("    forks came from %d roots; the most forked root had %d", len(perRoot), most)
 			}
 			for i, r := range rep.Results {
 				if r.Err == nil {
@@ -92,7 +103,13 @@ func TestDSTPhase4(t *testing.T) {
 					continue
 				}
 				failed++
-				k := phase3Why(r.Err) + " | " + dsttest.Signature(r.Err)
+				// The kind: the check that caught it, or for anything else (a
+				// panic, a hang) its normalized signature: phase3Why names a
+				// panic by its goroutine, which would count one bug many times.
+				k := phase3Why(r.Err)
+				if strings.HasPrefix(k, "other: ") {
+					k = "other: " + dsttest.Signature(r.Err)
+				}
 				if len(k) > 160 {
 					k = k[:160]
 				}
@@ -108,6 +125,20 @@ func TestDSTPhase4(t *testing.T) {
 			sort.Slice(keys, func(i, j int) bool { return firstAt[keys[i]] < firstAt[keys[j]] })
 			t.Logf("%s, %s (by %q): %d runs (%d forks, %.1f forks deep), %d failing (%d inconclusive apart), %d distinct, %d abstract states, cpu %.0fs",
 				b.name, arm, o.ExploreBy, rep.Runs, forks, float64(depth)/float64(max(uint64(forks), 1)) /* raft's uint64 max */, failed, inconclusive, len(kinds), rep.States, cpu.Seconds())
+			var curve []string
+			for _, at := range []int{250, 500, 1000, 2000, 4000} {
+				if at > rep.Runs {
+					break
+				}
+				c := 0
+				for _, k := range keys {
+					if firstAt[k] <= at {
+						c++
+					}
+				}
+				curve = append(curve, fmt.Sprintf("%d by run %d", c, at))
+			}
+			t.Logf("    distinct kinds: %s", strings.Join(curve, ", "))
 			for _, k := range keys {
 				t.Logf("    run %4d first, %3d runs: %s", firstAt[k], kinds[k], k)
 			}
